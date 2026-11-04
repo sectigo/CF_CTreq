@@ -111,6 +111,24 @@ test("Content-Type parameters and case are accepted", async () => {
   assert.equal(res.status, 200);
 });
 
+test("oversized Content-Length gets 413 without reading the body", async () => {
+  const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
+  req.headers.set("Content-Length", String(128 * 1024 + 1));
+  let read = false;
+  req.text = async () => { read = true; return ""; };
+  const res = await snippet.fetch(req);
+  assert.equal(res.status, 413);
+  assert.equal(read, false);
+  assert.equal(forwarded, null);
+});
+
+test("Content-Length at the limit is accepted", async () => {
+  const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
+  req.headers.set("Content-Length", String(128 * 1024));
+  const res = await snippet.fetch(req);
+  assert.equal(res.status, 200);
+});
+
 test("other requests pass through untouched", async () => {
   let res = await snippet.fetch(new Request("https://log.example.com/ct/v1/get-sth"));
   assert.equal(res.status, 200);
