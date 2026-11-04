@@ -75,6 +75,42 @@ test("malformed requests are rejected", async () => {
   assert.equal(forwarded, null);
 });
 
+test("non-POST requests to the endpoints get 405", async () => {
+  for (const method of ["GET", "PUT", "DELETE", "OPTIONS"]) {
+    for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
+      const res = await snippet.fetch(new Request("https://log.example.com" + path, { method }));
+      assert.equal(res.status, 405, method + " " + path);
+      assert.equal(res.headers.get("Allow"), "POST");
+    }
+  }
+  assert.equal(forwarded, null);
+});
+
+test("non-JSON Content-Type gets 415", async () => {
+  for (const contentType of ["text/plain", "application/x-www-form-urlencoded", null]) {
+    const headers = contentType ? { "Content-Type": contentType } : {};
+    const req = new Request("https://log.example.com/ct/v1/add-chain", {
+      method: "POST",
+      headers,
+      body: new Uint8Array([0x7b, 0x7d]),
+    });
+    if (!contentType) req.headers.delete("Content-Type");
+    const res = await snippet.fetch(req);
+    assert.equal(res.status, 415, String(contentType));
+  }
+  assert.equal(forwarded, null);
+});
+
+test("Content-Type parameters and case are accepted", async () => {
+  const req = new Request("https://log.example.com/ct/v1/add-chain", {
+    method: "POST",
+    headers: { "Content-Type": "Application/JSON; charset=utf-8" },
+    body: JSON.stringify({ chain: [CERT, ISSUER] }),
+  });
+  const res = await snippet.fetch(req);
+  assert.equal(res.status, 200);
+});
+
 test("other requests pass through untouched", async () => {
   let res = await snippet.fetch(new Request("https://log.example.com/ct/v1/get-sth"));
   assert.equal(res.status, 200);
