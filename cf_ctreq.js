@@ -20,9 +20,6 @@ const CT_POISON_EXTENSION = String.fromCharCode(
   0x04, 0x02, 0x05, 0x00,
 );
 
-const ADD_CHAIN = "/ct/v1/add-chain";
-const ADD_PRE_CHAIN = "/ct/v1/add-pre-chain";
-
 function errorResponse(message) {
   return new Response(message + "\n", {
     status: 400,
@@ -38,9 +35,9 @@ export default {
 
     const path = new URL(request.url).pathname;
     let isPreChainAPI;
-    if (path.endsWith(ADD_CHAIN)) {
+    if (path.endsWith("/ct/v1/add-chain")) {
       isPreChainAPI = false;
-    } else if (path.endsWith(ADD_PRE_CHAIN)) {
+    } else if (path.endsWith("/ct/v1/add-pre-chain")) {
       isPreChainAPI = true;
     } else {
       return fetch(request);
