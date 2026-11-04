@@ -8,11 +8,11 @@ const POISON = [
 ];
 
 // Fake DER-ish byte blobs; the snippet only scans for the poison byte sequence.
-const CERT = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(64).fill(0xab)]).toString("base64");
-const PRECERT = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(32).fill(0xab), ...POISON, ...Array(32).fill(0xcd)]).toString("base64");
+const CERT = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(160).fill(0xab)]).toString("base64");
+const PRECERT = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(64).fill(0xab), ...POISON, ...Array(64).fill(0xcd)]).toString("base64");
 // Poison extension without the critical flag is not the DER sequence we look for.
-const NONCRITICAL = Buffer.from([0x30, 0x10, ...POISON.slice(2, 14), 0x04, 0x02, 0x05, 0x00]).toString("base64");
-const ISSUER = Buffer.from([0x30, 0x82, 0x01, 0x00, ...POISON]).toString("base64");
+const NONCRITICAL = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(128).fill(0xab), 0x30, 0x10, ...POISON.slice(2, 14), 0x04, 0x02, 0x05, 0x00]).toString("base64");
+const ISSUER = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(128).fill(0xab), ...POISON]).toString("base64");
 
 let forwarded;
 beforeEach(() => {
@@ -73,6 +73,32 @@ test("malformed requests are rejected", async () => {
     assert.equal(res.status, 400, body);
   }
   assert.equal(forwarded, null);
+});
+
+test("chain shape violations are rejected", async () => {
+  const SHORT = Buffer.alloc(127, 0xab).toString("base64");
+  const bodies = {
+    "too many entries": { chain: Array(11).fill(CERT) },
+    "non-string later entry": { chain: [CERT, 1] },
+    "invalid base64 later entry": { chain: [CERT, "!!!"] },
+    "URL-safe base64": { chain: [CERT.replace(/\+/g, "-").replace(/\//g, "_") + "-_"] },
+    "unpadded base64": { chain: [CERT.replace(/=+$/, "")] },
+    "short first entry": { chain: [SHORT] },
+    "short later entry": { chain: [CERT, SHORT] },
+    "empty later entry": { chain: [CERT, ""] },
+  };
+  for (const [name, body] of Object.entries(bodies)) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", body));
+    assert.equal(res.status, 400, name);
+  }
+  assert.equal(forwarded, null);
+});
+
+test("maximum chain length and extra top-level fields are accepted", async () => {
+  const body = JSON.stringify({ chain: [CERT, ...Array(9).fill(ISSUER)], extra: true });
+  const res = await snippet.fetch(post("/ct/v1/add-chain", body));
+  assert.equal(res.status, 200);
+  assert.equal(forwarded.body, body);
 });
 
 test("non-POST requests to the endpoints get 405", async () => {

@@ -15,7 +15,9 @@ Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are chec
 - `405 Method Not Allowed` (with an `Allow: POST` header) if the method is not `POST`.
 - `415 Unsupported Media Type` if the `Content-Type` is not `application/json`.
 - `413 Content Too Large` if the `Content-Length` exceeds 128 KiB (checked before the body is read).
-- `400 Bad Request` if the body is not valid JSON, or `chain` is missing/empty, or its first entry is not valid base64.
+- `400 Bad Request` if the body is not valid JSON.
+- `400 Bad Request` if `chain` is missing/empty.
+- `400 Bad Request` if `chain` has more than 10 entries, or any entry is not a standard padded base64 string, or decodes to fewer than 128 bytes.
 - `400 Bad Request` if the first certificate in `chain` contains the byte sequence of a DER encoded, critical CT Poison extension (OID `1.3.6.1.4.1.11129.2.4.3`) and the request was sent to `add-chain`.
 - `400 Bad Request` if the first certificate does not contain the poison extension and the request was sent to `add-pre-chain`.
 
