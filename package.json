@@ -1,5 +1,5 @@
 {
-  "name": "ct-snippet",
+  "name": "cf_ctreq",
   "version": "1.0.0",
   "private": true,
   "description": "Cloudflare Snippet that preprocesses Certificate Transparency log add-chain and add-pre-chain requests",

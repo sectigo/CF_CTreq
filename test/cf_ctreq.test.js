@@ -1,6 +1,6 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import snippet from "../snippet.js";
+import snippet from "../cf_ctreq.js";
 
 const POISON = [
   0x30, 0x13, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02,
