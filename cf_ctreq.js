@@ -9,6 +9,8 @@
 //     01 01 ff                             BOOLEAN TRUE (critical)
 //     04 02 05 00                          OCTET STRING { NULL }
 //
+// Requests to these endpoints must be POST (else 405) with a Content-Type of
+// application/json (else 415).
 // If the poison extension is present, only add-pre-chain is permitted.
 // If it is absent, only add-chain is permitted.
 // Requests that pass these checks are forwarded to the origin unchanged.
@@ -20,19 +22,15 @@ const CT_POISON_EXTENSION = String.fromCharCode(
   0x04, 0x02, 0x05, 0x00,
 );
 
-function errorResponse(message) {
+function errorResponse(message, status = 400, headers = {}) {
   return new Response(message + "\n", {
-    status: 400,
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8", ...headers },
   });
 }
 
 export default {
   async fetch(request) {
-    if (request.method !== "POST") {
-      return fetch(request);
-    }
-
     const path = new URL(request.url).pathname;
     let isPreChainAPI;
     if (path.endsWith("/ct/v1/add-chain")) {
@@ -41,6 +39,15 @@ export default {
       isPreChainAPI = true;
     } else {
       return fetch(request);
+    }
+
+    if (request.method !== "POST") {
+      return errorResponse("method not allowed; use POST", 405, { Allow: "POST" });
+    }
+
+    const mediaType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+    if (mediaType !== "application/json") {
+      return errorResponse("unsupported media type; use application/json", 415);
     }
 
     const body = await request.text();
