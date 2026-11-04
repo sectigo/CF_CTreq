@@ -11,9 +11,10 @@
 //
 // Requests to these endpoints must be POST (else 405) with a Content-Type of
 // application/json (else 415) and a Content-Length of at most MAX_BODY_BYTES
-// (else 413).
-// If the poison extension is present, only add-pre-chain is permitted.
-// If it is absent, only add-chain is permitted.
+// (else 413). The chain must be a non-empty array of at most MAX_CHAIN_LENGTH
+// base64 strings, each decoding to at least MIN_CERT_BYTES (else 400).
+// If a critical CT Poison extension is present, only add-pre-chain is
+// permitted. If it is absent, only add-chain is permitted.
 // Requests that pass these checks are forwarded to the origin unchanged.
 
 const CT_POISON_EXTENSION = String.fromCharCode(
@@ -24,6 +25,10 @@ const CT_POISON_EXTENSION = String.fromCharCode(
 );
 
 const MAX_BODY_BYTES = 128 * 1024;
+const MAX_CHAIN_LENGTH = 10;
+const MIN_CERT_BYTES = 128;
+// Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient.
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function errorResponse(message, status = 400, headers = {}) {
   return new Response(message + "\n", {
@@ -60,17 +65,29 @@ export default {
 
     const body = await request.text();
 
-    let firstCert;
+    let chain;
     try {
-      const chain = JSON.parse(body).chain;
-      if (!Array.isArray(chain) || chain.length === 0 || typeof chain[0] !== "string") {
-        return errorResponse("chain is missing or empty");
-      }
-      // atob() returns a "binary string" (one char per byte).
-      firstCert = atob(chain[0]);
+      chain = JSON.parse(body).chain;
     } catch {
       return errorResponse("unable to parse request body");
     }
+    if (!Array.isArray(chain) || chain.length === 0) {
+      return errorResponse("chain is missing or empty");
+    }
+    if (chain.length > MAX_CHAIN_LENGTH) {
+      return errorResponse("chain has too many entries");
+    }
+    for (const entry of chain) {
+      if (typeof entry !== "string" || !BASE64.test(entry)) {
+        return errorResponse("chain entries must be base64 strings");
+      }
+      const padding = entry.endsWith("==") ? 2 : entry.endsWith("=") ? 1 : 0;
+      if ((entry.length * 3) / 4 - padding < MIN_CERT_BYTES) {
+        return errorResponse("chain entry is too short to be a certificate");
+      }
+    }
+    // atob() returns a "binary string" (one char per byte).
+    const firstCert = atob(chain[0]);
 
     const hasPoison = firstCert.includes(CT_POISON_EXTENSION);
     if (hasPoison && !isPreChainAPI) {
