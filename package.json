@@ -1,0 +1,10 @@
+{
+  "name": "ct-snippet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Snippet that preprocesses Certificate Transparency log add-chain and add-pre-chain requests",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
