@@ -10,7 +10,8 @@
 //     04 02 05 00                          OCTET STRING { NULL }
 //
 // Requests to these endpoints must be POST (else 405) with a Content-Type of
-// application/json (else 415).
+// application/json (else 415) and a Content-Length of at most MAX_BODY_BYTES
+// (else 413).
 // If the poison extension is present, only add-pre-chain is permitted.
 // If it is absent, only add-chain is permitted.
 // Requests that pass these checks are forwarded to the origin unchanged.
@@ -21,6 +22,8 @@ const CT_POISON_EXTENSION = String.fromCharCode(
   0x01, 0x01, 0xff,
   0x04, 0x02, 0x05, 0x00,
 );
+
+const MAX_BODY_BYTES = 128 * 1024;
 
 function errorResponse(message, status = 400, headers = {}) {
   return new Response(message + "\n", {
@@ -48,6 +51,11 @@ export default {
     const mediaType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
     if (mediaType !== "application/json") {
       return errorResponse("unsupported media type; use application/json", 415);
+    }
+
+    const contentLength = request.headers.get("Content-Length");
+    if (contentLength !== null && Number(contentLength) > MAX_BODY_BYTES) {
+      return errorResponse("request body too large", 413);
     }
 
     const body = await request.text();
