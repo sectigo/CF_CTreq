@@ -18,6 +18,7 @@ Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are chec
 - `400 Bad Request` if the body is not valid JSON.
 - `400 Bad Request` if `chain` is missing/empty.
 - `400 Bad Request` if `chain` has more than 10 entries, or any entry is not a standard padded base64 string, or decodes to fewer than 128 bytes.
+- `400 Bad Request` if any entry does not start with a DER `SEQUENCE` tag (`0x30`) or its declared DER length does not match its decoded length.
 - `400 Bad Request` if the first certificate in `chain` contains the byte sequence of a DER encoded, critical CT Poison extension (OID `1.3.6.1.4.1.11129.2.4.3`) and the request was sent to `add-chain`.
 - `400 Bad Request` if the first certificate does not contain the poison extension and the request was sent to `add-pre-chain`.
 

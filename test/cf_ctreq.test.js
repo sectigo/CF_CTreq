@@ -7,12 +7,13 @@ const POISON = [
   0x04, 0x03, 0x01, 0x01, 0xff, 0x04, 0x02, 0x05, 0x00,
 ];
 
-// Fake DER-ish byte blobs; the snippet only scans for the poison byte sequence.
-const CERT = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(160).fill(0xab)]).toString("base64");
-const PRECERT = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(64).fill(0xab), ...POISON, ...Array(64).fill(0xcd)]).toString("base64");
+// Fake DER-ish blobs: a valid SEQUENCE header around filler; the snippet only scans for the poison byte sequence.
+const der = (content) => Buffer.from([0x30, 0x82, content.length >> 8, content.length & 0xff, ...content]);
+const CERT = der(Array(160).fill(0xab)).toString("base64");
+const PRECERT = der([...Array(64).fill(0xab), ...POISON, ...Array(64).fill(0xcd)]).toString("base64");
 // Poison extension without the critical flag is not the DER sequence we look for.
-const NONCRITICAL = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(128).fill(0xab), 0x30, 0x10, ...POISON.slice(2, 14), 0x04, 0x02, 0x05, 0x00]).toString("base64");
-const ISSUER = Buffer.from([0x30, 0x82, 0x01, 0x00, ...Array(128).fill(0xab), ...POISON]).toString("base64");
+const NONCRITICAL = der([...Array(128).fill(0xab), 0x30, 0x10, ...POISON.slice(2, 14), 0x04, 0x02, 0x05, 0x00]).toString("base64");
+const ISSUER = der([...Array(128).fill(0xab), ...POISON]).toString("base64");
 
 let forwarded;
 beforeEach(() => {
@@ -76,7 +77,7 @@ test("malformed requests are rejected", async () => {
 });
 
 test("chain shape violations are rejected", async () => {
-  const SHORT = Buffer.alloc(127, 0xab).toString("base64");
+  const SHORT = der(Array(100).fill(0xab)).toString("base64");
   const bodies = {
     "too many entries": { chain: Array(11).fill(CERT) },
     "non-string later entry": { chain: [CERT, 1] },
@@ -92,6 +93,31 @@ test("chain shape violations are rejected", async () => {
     assert.equal(res.status, 400, name);
   }
   assert.equal(forwarded, null);
+});
+
+test("entries that are not a DER SEQUENCE of the declared length are rejected", async () => {
+  const filler = Array(160).fill(0xab);
+  const entries = {
+    "wrong tag": [0x31, 0x82, 0x00, 0xa0, ...filler],
+    "length too large": [0x30, 0x82, 0x00, 0xa1, ...filler],
+    "length too small": [0x30, 0x82, 0x00, 0x9f, ...filler],
+    "indefinite length": [0x30, 0x80, ...filler],
+    "oversized length-of-length": [0x30, 0x85, 0x00, 0x00, 0x00, 0x00, 0xa0, ...filler],
+  };
+  for (const [name, bytes] of Object.entries(entries)) {
+    const b64 = Buffer.from(bytes).toString("base64");
+    for (const chain of [[b64], [CERT, b64]]) {
+      const res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
+      assert.equal(res.status, 400, name);
+    }
+  }
+  assert.equal(forwarded, null);
+});
+
+test("one-byte long-form DER length is accepted", async () => {
+  const cert = Buffer.from([0x30, 0x81, 0xa0, ...Array(160).fill(0xab)]).toString("base64");
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [cert] }));
+  assert.equal(res.status, 200);
 });
 
 test("maximum chain length and extra top-level fields are accepted", async () => {

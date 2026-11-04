@@ -12,7 +12,8 @@
 // Requests to these endpoints must be POST (else 405) with a Content-Type of
 // application/json (else 415) and a Content-Length of at most MAX_BODY_BYTES
 // (else 413). The chain must be a non-empty array of at most MAX_CHAIN_LENGTH
-// base64 strings, each decoding to at least MIN_CERT_BYTES (else 400).
+// base64 strings, each decoding to at least MIN_CERT_BYTES and to a DER
+// SEQUENCE whose declared length matches its actual length (else 400).
 // If a critical CT Poison extension is present, only add-pre-chain is
 // permitted. If it is absent, only add-chain is permitted.
 // Requests that pass these checks are forwarded to the origin unchanged.
@@ -29,6 +30,28 @@ const MAX_CHAIN_LENGTH = 10;
 const MIN_CERT_BYTES = 128;
 // Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient.
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+// Total size implied by a DER SEQUENCE header, or -1 if the header is not valid.
+// Callers must ensure bytes is at least 6 characters long.
+function derSequenceSize(bytes) {
+  if (bytes.charCodeAt(0) !== 0x30) {
+    return -1;
+  }
+  const first = bytes.charCodeAt(1);
+  if (first < 0x80) {
+    return 2 + first;
+  }
+  // 0x80 is indefinite length, which DER forbids; more than 4 length bytes is implausible.
+  const n = first & 0x7f;
+  if (n === 0 || n > 4) {
+    return -1;
+  }
+  let length = 0;
+  for (let i = 0; i < n; i++) {
+    length = length * 256 + bytes.charCodeAt(2 + i);
+  }
+  return 2 + n + length;
+}
 
 function errorResponse(message, status = 400, headers = {}) {
   return new Response(message + "\n", {
@@ -77,17 +100,21 @@ export default {
     if (chain.length > MAX_CHAIN_LENGTH) {
       return errorResponse("chain has too many entries");
     }
+    let firstCert;
     for (const entry of chain) {
       if (typeof entry !== "string" || !BASE64.test(entry)) {
         return errorResponse("chain entries must be base64 strings");
       }
-      const padding = entry.endsWith("==") ? 2 : entry.endsWith("=") ? 1 : 0;
-      if ((entry.length * 3) / 4 - padding < MIN_CERT_BYTES) {
+      // atob() returns a "binary string" (one char per byte).
+      const cert = atob(entry);
+      if (cert.length < MIN_CERT_BYTES) {
         return errorResponse("chain entry is too short to be a certificate");
       }
+      if (derSequenceSize(cert) !== cert.length) {
+        return errorResponse("chain entry is not a DER SEQUENCE of the declared length");
+      }
+      firstCert ??= cert;
     }
-    // atob() returns a "binary string" (one char per byte).
-    const firstCert = atob(chain[0]);
 
     const hasPoison = firstCert.includes(CT_POISON_EXTENSION);
     if (hasPoison && !isPreChainAPI) {
