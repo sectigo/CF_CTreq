@@ -19,8 +19,12 @@ Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are chec
 - `400 Bad Request` if `chain` is missing/empty.
 - `400 Bad Request` if `chain` has more than 10 entries, or any entry is not a standard padded base64 string, or decodes to fewer than 128 bytes.
 - `400 Bad Request` if any entry does not start with a DER `SEQUENCE` tag (`0x30`) or its declared DER length does not match its decoded length.
-- `400 Bad Request` if the first certificate in `chain` contains the byte sequence of a DER encoded, critical CT Poison extension (OID `1.3.6.1.4.1.11129.2.4.3`) and the request was sent to `add-chain`.
-- `400 Bad Request` if the first certificate does not contain the poison extension and the request was sent to `add-pre-chain`.
+- `400 Bad Request` if the first certificate (or its extensions) cannot be parsed as X.509.
+- `400 Bad Request` if the first certificate has a CT Poison extension (OID `1.3.6.1.4.1.11129.2.4.3`) that is not critical or whose value is not `NULL`.
+- `400 Bad Request` if the first certificate has a CT Poison extension and also an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`).
+- `400 Bad Request` if the first certificate has a CT Poison extension and the request was sent to `add-chain`.
+- `400 Bad Request` if the first certificate has no CT Poison extension and the request was sent to `add-pre-chain`.
+- `400 Bad Request` if the request was sent to `add-chain` and the second certificate is a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`).  An unparseable second certificate is left for the origin to reject.
 
 All other requests (and valid submissions) are forwarded to the origin unchanged.
 

@@ -2,18 +2,45 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import snippet from "../cf_ctreq.js";
 
-const POISON = [
-  0x30, 0x13, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02,
-  0x04, 0x03, 0x01, 0x01, 0xff, 0x04, 0x02, 0x05, 0x00,
-];
+// Minimal DER builders; certificates are structurally valid X.509 but have fake signatures.
+const tlv = (tag, content) => {
+  const body = Buffer.from(content);
+  const n = body.length;
+  const header = n < 0x80 ? [tag, n] : n < 0x100 ? [tag, 0x81, n] : [tag, 0x82, n >> 8, n & 0xff];
+  return Buffer.concat([Buffer.from(header), body]);
+};
+const seq = (...parts) => tlv(0x30, Buffer.concat(parts));
+const ctOid = (last) => [0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, last]; // 1.3.6.1.4.1.11129.2.4.<last>
+const OID_EKU = [0x55, 0x1d, 0x25];
+const ext = (oid, critical, value) =>
+  seq(tlv(0x06, oid), critical ? tlv(0x01, [0xff]) : Buffer.alloc(0), tlv(0x04, value));
+const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
 
-// Fake DER-ish blobs: a valid SEQUENCE header around filler; the snippet only scans for the poison byte sequence.
+function makeCert({ extensions, subject = Buffer.alloc(100, 0x61) } = {}) {
+  const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
+  const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
+  const time = tlv(0x17, Buffer.from("260101000000Z"));
+  const tbs = seq(
+    tlv(0xa0, tlv(0x02, [2])),
+    tlv(0x02, [1]),
+    alg,
+    name("Test CA"),
+    seq(time, time),
+    name(subject),
+    seq(alg, tlv(0x03, [0, ...Array(32).fill(1)])),
+    extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0),
+  );
+  return seq(tbs, alg, tlv(0x03, [0, ...Array(64).fill(2)]));
+}
+
+const b64 = (buf) => buf.toString("base64");
+// A valid outer SEQUENCE header around filler, for tests that don't need a parseable certificate.
 const der = (content) => Buffer.from([0x30, 0x82, content.length >> 8, content.length & 0xff, ...content]);
-const CERT = der(Array(160).fill(0xab)).toString("base64");
-const PRECERT = der([...Array(64).fill(0xab), ...POISON, ...Array(64).fill(0xcd)]).toString("base64");
-// Poison extension without the critical flag is not the DER sequence we look for.
-const NONCRITICAL = der([...Array(128).fill(0xab), 0x30, 0x10, ...POISON.slice(2, 14), 0x04, 0x02, 0x05, 0x00]).toString("base64");
-const ISSUER = der([...Array(128).fill(0xab), ...POISON]).toString("base64");
+
+const CERT = b64(makeCert());
+const PRECERT = b64(makeCert({ extensions: [POISON_EXT] }));
+const NONCRITICAL = b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00])] }));
+const ISSUER = b64(makeCert());
 
 let forwarded;
 beforeEach(() => {
@@ -63,9 +90,67 @@ test("only the first certificate is scanned", async () => {
   assert.equal(res.status, 200);
 });
 
-test("non-critical poison extension is not treated as poison", async () => {
-  const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [NONCRITICAL] }));
+test("non-critical poison extension is rejected", async () => {
+  for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
+    const res = await snippet.fetch(post(path, { chain: [NONCRITICAL] }));
+    assert.equal(res.status, 400, path);
+  }
+  assert.equal(forwarded, null);
+});
+
+test("poison bytes outside the extensions are not treated as poison", async () => {
+  const lookalike = b64(makeCert({ subject: Buffer.concat([Buffer.alloc(50, 0x61), POISON_EXT]) }));
+  let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [lookalike] }));
+  assert.equal(res.status, 200);
+  res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [lookalike] }));
   assert.equal(res.status, 400);
+});
+
+test("poison extension with a non-NULL value is rejected", async () => {
+  const wrongValue = b64(makeCert({ extensions: [ext(ctOid(3), true, [0x30, 0x00])] }));
+  for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
+    const res = await snippet.fetch(post(path, { chain: [wrongValue] }));
+    assert.equal(res.status, 400, path);
+  }
+  assert.equal(forwarded, null);
+});
+
+test("poison together with an embedded SCT list is rejected", async () => {
+  const sctList = ext(ctOid(2), false, [0x04, 0x00]);
+  const both = b64(makeCert({ extensions: [POISON_EXT, sctList] }));
+  const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [both, ISSUER] }));
+  assert.equal(res.status, 400);
+  assert.equal(forwarded, null);
+  const sctOnly = b64(makeCert({ extensions: [sctList] }));
+  assert.equal((await snippet.fetch(post("/ct/v1/add-chain", { chain: [sctOnly, ISSUER] }))).status, 200);
+});
+
+test("precertificate signing certificate is rejected as the issuer on add-chain only", async () => {
+  const eku = (...oids) => ext(OID_EKU, false, seq(...oids.map((o) => tlv(0x06, o))));
+  const serverAuth = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
+  const psc = b64(makeCert({ extensions: [eku(serverAuth, ctOid(4))] }));
+  const plainEku = b64(makeCert({ extensions: [eku(serverAuth)] }));
+  let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, psc] }));
+  assert.equal(res.status, 400);
+  assert.equal(forwarded, null);
+  res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }));
+  assert.equal(res.status, 200);
+  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, plainEku] }));
+  assert.equal(res.status, 200);
+});
+
+test("unparseable first certificate is rejected; unparseable issuer is left to the origin", async () => {
+  const garbage = b64(der(Array(160).fill(0xab)));
+  const badExtension = b64(makeCert({ extensions: [seq(tlv(0x04, [1]), tlv(0x04, [2]))] }));
+  for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
+    for (const first of [garbage, badExtension]) {
+      const res = await snippet.fetch(post(path, { chain: [first] }));
+      assert.equal(res.status, 400, path);
+    }
+  }
+  assert.equal(forwarded, null);
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, garbage] }));
+  assert.equal(res.status, 200);
 });
 
 test("malformed requests are rejected", async () => {
@@ -77,7 +162,8 @@ test("malformed requests are rejected", async () => {
 });
 
 test("chain shape violations are rejected", async () => {
-  const SHORT = der(Array(100).fill(0xab)).toString("base64");
+  const SHORT = b64(der(Array(100).fill(0xab)));
+  assert.ok(CERT.endsWith("="), "fixture must need base64 padding");
   const bodies = {
     "too many entries": { chain: Array(11).fill(CERT) },
     "non-string later entry": { chain: [CERT, 1] },
@@ -115,8 +201,9 @@ test("entries that are not a DER SEQUENCE of the declared length are rejected", 
 });
 
 test("one-byte long-form DER length is accepted", async () => {
-  const cert = Buffer.from([0x30, 0x81, 0xa0, ...Array(160).fill(0xab)]).toString("base64");
-  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [cert] }));
+  const buf = makeCert({ subject: Buffer.alloc(20, 0x61) });
+  assert.equal(buf[1], 0x81);
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(buf)] }));
   assert.equal(res.status, 200);
 });
 
