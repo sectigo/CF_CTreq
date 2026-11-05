@@ -14,6 +14,8 @@
 // - A poisoned certificate must not also contain an embedded SCT list.
 // - On add-chain, the second certificate must not be a Precertificate Signing
 //   Certificate (RFC 6962 section 3.1), which can only sign precertificates.
+// - If there is a second certificate, the first certificate's issuer name must be
+//   byte-identical to its subject name. Signatures are not verified.
 // Requests that pass these checks are forwarded to the origin unchanged.
 
 // OID contents (without tag and length) as binary strings.
@@ -55,7 +57,7 @@ function derDecode(data, i, end = data.length) {
   if (offset + length > end) {
     return null;
   }
-  return { tag, length, offset, end: offset + length };
+  return { tag, length, offset, end: offset + length, start: i };
 }
 
 // Decodes all TLVs directly inside parent, or returns null if any is malformed.
@@ -71,13 +73,37 @@ function derChildren(data, parent) {
   return children;
 }
 
+// Decodes the fields of an X.509 TBSCertificate, or returns null if it is malformed.
+function tbsFields(cert) {
+  const root = derDecode(cert, 0);
+  const tbs = root && derDecode(cert, root.offset, root.end);
+  return tbs && tbs.tag === 0x30 ? derChildren(cert, tbs) : null;
+}
+
+// Returns the DER encodings (including headers) of the issuer and subject names,
+// or null if the TBSCertificate is malformed.
+function certNames(cert) {
+  const fields = tbsFields(cert);
+  if (fields === null) {
+    return null;
+  }
+  const i = fields[0]?.tag === 0xa0 ? 1 : 0; // Skip the optional [0] version.
+  const issuer = fields[i + 2]; // After serialNumber and signature.
+  const subject = fields[i + 4]; // After validity.
+  if (issuer?.tag !== 0x30 || subject?.tag !== 0x30) {
+    return null;
+  }
+  return {
+    issuer: cert.slice(issuer.start, issuer.end),
+    subject: cert.slice(subject.start, subject.end),
+  };
+}
+
 // Parses the extensions of an X.509 certificate into { oid, critical, value } entries
 // (value is the DER location of the extnValue contents). Returns [] if the certificate
 // has no extensions, or null if the certificate or its extensions are malformed.
 function certExtensions(cert) {
-  const root = derDecode(cert, 0);
-  const tbs = root && derDecode(cert, root.offset, root.end);
-  const fields = tbs && tbs.tag === 0x30 ? derChildren(cert, tbs) : null;
+  const fields = tbsFields(cert);
   if (fields === null) {
     return null;
   }
@@ -206,6 +232,17 @@ export default {
     }
     if (!isPreChainAPI && certs.length > 1 && isPrecertSigningCert(certs[1])) {
       return errorResponse("precertificate signing certificate submitted as the issuer to add-chain");
+    }
+    if (certs.length > 1) {
+      const leaf = certNames(certs[0]);
+      if (leaf === null) {
+        return errorResponse("unable to parse the issuer name of the first certificate");
+      }
+      // An unparseable second certificate is left for the origin to reject.
+      const issuer = certNames(certs[1]);
+      if (issuer !== null && leaf.issuer !== issuer.subject) {
+        return errorResponse("issuer of the first certificate does not match the subject of the second");
+      }
     }
 
     // The original body stream has been consumed, so forward a copy.
