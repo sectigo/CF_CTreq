@@ -29,6 +29,12 @@ Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are chec
 
 All other requests (and valid submissions) are forwarded to the origin unchanged.
 
+Every rejection response also carries an `X-CTreq-Reject` header with a short reason code, so that rejections can be analysed in Cloudflare logs.  The codes are `method-not-allowed`, `unsupported-media-type`, `body-too-large`, `invalid-json`, `chain-missing`, `chain-too-long`, `entry-not-base64`, `entry-too-short`, `entry-not-der`, `cert-unparseable`, `poison-invalid`, `poison-with-sct-list`, `precert-on-add-chain`, `cert-on-add-pre-chain`, `psc-on-add-chain`, `issuer-unparseable` and `issuer-mismatch`.  The response body is a JSON [problem details](https://www.rfc-editor.org/rfc/rfc9457) object (`Content-Type: application/problem+json`) whose `type` is `https://github.com/sectigo/CF_CTreq#` followed by the reason code, whose `title` is a short description, and whose `status` repeats the HTTP status code, e.g.:
+
+```json
+{"type":"https://github.com/sectigo/CF_CTreq#poison-invalid","title":"CT poison extension must be critical and contain NULL","status":400}
+```
+
 Further checks may be added in the future.
 
 ## Deployment

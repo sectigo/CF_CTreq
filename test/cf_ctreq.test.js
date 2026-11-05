@@ -173,6 +173,53 @@ test("unparseable first certificate is rejected; unparseable issuer is left to t
   assert.equal(res.status, 200);
 });
 
+test("every rejection carries an X-CTreq-Reject reason", async () => {
+  const ADD = "/ct/v1/add-chain";
+  const PRE = "/ct/v1/add-pre-chain";
+  const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
+  const sctList = ext(ctOid(2), false, [0x04, 0x00]);
+  const poisonAndSct = b64(makeCert({ extensions: [POISON_EXT, sctList] }));
+  const noNames = b64(seq(seq(tlv(0x02, [1]), tlv(0x04, Array(150).fill(0))), seq(tlv(0x06, [0x2a])), tlv(0x03, [0])));
+  const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
+  const bigLength = post(ADD, { chain: [CERT] });
+  bigLength.headers.set("Content-Length", String(128 * 1024 + 1));
+  const textPlain = new Request("https://log.example.com" + ADD, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: "x",
+  });
+  const cases = {
+    "method-not-allowed": new Request("https://log.example.com" + ADD),
+    "unsupported-media-type": textPlain,
+    "body-too-large": bigLength,
+    "invalid-json": post(ADD, "not json"),
+    "chain-missing": post(ADD, "{}"),
+    "chain-too-long": post(ADD, { chain: Array(11).fill(CERT) }),
+    "entry-not-base64": post(ADD, { chain: ["!!!"] }),
+    "entry-too-short": post(ADD, { chain: [b64(der(Array(100).fill(0xab)))] }),
+    "entry-not-der": post(ADD, { chain: [b64(Buffer.from([0x31, 0x82, 0x00, 0xa0, ...Array(160).fill(0xab)]))] }),
+    "cert-unparseable": post(ADD, { chain: [b64(der(Array(160).fill(0xab)))] }),
+    "poison-invalid": post(ADD, { chain: [NONCRITICAL] }),
+    "poison-with-sct-list": post(PRE, { chain: [poisonAndSct, ISSUER] }),
+    "precert-on-add-chain": post(ADD, { chain: [PRECERT] }),
+    "cert-on-add-pre-chain": post(PRE, { chain: [CERT] }),
+    "psc-on-add-chain": post(ADD, { chain: [CERT, psc] }),
+    "issuer-unparseable": post(ADD, { chain: [noNames, ISSUER] }),
+    "issuer-mismatch": post(ADD, { chain: [CERT, otherCA] }),
+  };
+  for (const [reason, req] of Object.entries(cases)) {
+    const res = await snippet.fetch(req);
+    assert.notEqual(res.status, 200, reason);
+    assert.equal(res.headers.get("X-CTreq-Reject"), reason);
+    assert.equal(res.headers.get("Content-Type"), "application/problem+json", reason);
+    const problem = await res.json();
+    assert.equal(problem.type, "https://github.com/sectigo/CF_CTreq#" + reason);
+    assert.equal(problem.status, res.status, reason);
+    assert.equal(typeof problem.title, "string", reason);
+  }
+  assert.equal(forwarded, null);
+});
+
 test("malformed requests are rejected", async () => {
   for (const body of ["not json", "{}", '{"chain":[]}', '{"chain":[1]}', '{"chain":["!!!"]}']) {
     const res = await snippet.fetch(post("/ct/v1/add-chain", body));

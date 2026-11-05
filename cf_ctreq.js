@@ -146,10 +146,16 @@ function isPrecertSigningCert(cert) {
   return oids !== null && oids.some((o) => o.tag === 0x06 && cert.slice(o.offset, o.end) === OID_CT_PRECERT_SIGNING);
 }
 
-function errorResponse(message, status = 400, headers = {}) {
-  return new Response(message + "\n", {
+// Rejections are RFC 9457 problem details (application/problem+json, itself JSON as
+// RFC 6962 section 4 requires of all responses). The X-CTreq-Reject response header
+// carries the same reason code so that rejections can be analysed in Cloudflare logs.
+const PROBLEM_TYPE_BASE = "https://github.com/sectigo/CF_CTreq#";
+
+function errorResponse(reason, message, status = 400, headers = {}) {
+  const problem = { type: PROBLEM_TYPE_BASE + reason, title: message, status };
+  return new Response(JSON.stringify(problem) + "\n", {
     status,
-    headers: { "Content-Type": "text/plain; charset=utf-8", ...headers },
+    headers: { "Content-Type": "application/problem+json", "X-CTreq-Reject": reason, ...headers },
   });
 }
 
@@ -166,17 +172,17 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return errorResponse("method not allowed; use POST", 405, { Allow: "POST" });
+      return errorResponse("method-not-allowed", "method not allowed; use POST", 405, { Allow: "POST" });
     }
 
     const mediaType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
     if (mediaType !== "application/json") {
-      return errorResponse("unsupported media type; use application/json", 415);
+      return errorResponse("unsupported-media-type", "unsupported media type; use application/json", 415);
     }
 
     const contentLength = request.headers.get("Content-Length");
     if (contentLength !== null && Number(contentLength) > MAX_BODY_BYTES) {
-      return errorResponse("request body too large", 413);
+      return errorResponse("body-too-large", "request body too large", 413);
     }
 
     const body = await request.text();
@@ -185,63 +191,63 @@ export default {
     try {
       chain = JSON.parse(body).chain;
     } catch {
-      return errorResponse("unable to parse request body");
+      return errorResponse("invalid-json", "unable to parse request body");
     }
     if (!Array.isArray(chain) || chain.length === 0) {
-      return errorResponse("chain is missing or empty");
+      return errorResponse("chain-missing", "chain is missing or empty");
     }
     if (chain.length > MAX_CHAIN_LENGTH) {
-      return errorResponse("chain has too many entries");
+      return errorResponse("chain-too-long", "chain has too many entries");
     }
     const certs = [];
     for (const entry of chain) {
       if (typeof entry !== "string" || !BASE64.test(entry)) {
-        return errorResponse("chain entries must be base64 strings");
+        return errorResponse("entry-not-base64", "chain entries must be base64 strings");
       }
       // atob() returns a "binary string" (one char per byte).
       const cert = atob(entry);
       if (cert.length < MIN_CERT_BYTES) {
-        return errorResponse("chain entry is too short to be a certificate");
+        return errorResponse("entry-too-short", "chain entry is too short to be a certificate");
       }
       const root = derDecode(cert, 0);
       if (root === null || root.tag !== 0x30 || root.end !== cert.length) {
-        return errorResponse("chain entry is not a DER SEQUENCE of the declared length");
+        return errorResponse("entry-not-der", "chain entry is not a DER SEQUENCE of the declared length");
       }
       certs.push(cert);
     }
 
     const extensions = certExtensions(certs[0]);
     if (extensions === null) {
-      return errorResponse("unable to parse the extensions of the first certificate");
+      return errorResponse("cert-unparseable", "unable to parse the extensions of the first certificate");
     }
     const poison = extensions.find((e) => e.oid === OID_CT_POISON);
     if (poison !== undefined) {
       if (!poison.critical || certs[0].slice(poison.value.offset, poison.value.end) !== NULL_VALUE) {
-        return errorResponse("CT poison extension must be critical and contain NULL");
+        return errorResponse("poison-invalid", "CT poison extension must be critical and contain NULL");
       }
       if (extensions.some((e) => e.oid === OID_CT_SCT_LIST)) {
-        return errorResponse("precertificate must not contain an embedded SCT list");
+        return errorResponse("poison-with-sct-list", "precertificate must not contain an embedded SCT list");
       }
     }
     const hasPoison = poison !== undefined;
     if (hasPoison && !isPreChainAPI) {
-      return errorResponse("precertificate submitted to add-chain; use add-pre-chain");
+      return errorResponse("precert-on-add-chain", "precertificate submitted to add-chain; use add-pre-chain");
     }
     if (!hasPoison && isPreChainAPI) {
-      return errorResponse("certificate submitted to add-pre-chain; use add-chain");
+      return errorResponse("cert-on-add-pre-chain", "certificate submitted to add-pre-chain; use add-chain");
     }
     if (!isPreChainAPI && certs.length > 1 && isPrecertSigningCert(certs[1])) {
-      return errorResponse("precertificate signing certificate submitted as the issuer to add-chain");
+      return errorResponse("psc-on-add-chain", "precertificate signing certificate submitted as the issuer to add-chain");
     }
     if (certs.length > 1) {
       const leaf = certNames(certs[0]);
       if (leaf === null) {
-        return errorResponse("unable to parse the issuer name of the first certificate");
+        return errorResponse("issuer-unparseable", "unable to parse the issuer name of the first certificate");
       }
       // An unparseable second certificate is left for the origin to reject.
       const issuer = certNames(certs[1]);
       if (issuer !== null && leaf.issuer !== issuer.subject) {
-        return errorResponse("issuer of the first certificate does not match the subject of the second");
+        return errorResponse("issuer-mismatch", "issuer of the first certificate does not match the subject of the second");
       }
     }
 
