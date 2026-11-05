@@ -1,3 +1,8 @@
+// CF_CTreq - Preprocessor for Certificate Transparency (CT) log API requests
+// (RFC6962 and Static CT), implemented in JavaScript as a Cloudflare Snippet.
+// Written by Rob Stradling.
+// Copyright (C) 2026 Sectigo Limited.
+//
 // Cloudflare Snippet that preprocesses Certificate Transparency (RFC 6962)
 // add-chain and add-pre-chain POST requests.
 //
