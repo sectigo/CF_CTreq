@@ -25,6 +25,7 @@ Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are chec
 - `400 Bad Request` if the first certificate has a CT Poison extension and the request was sent to `add-chain`.
 - `400 Bad Request` if the first certificate has no CT Poison extension and the request was sent to `add-pre-chain`.
 - `400 Bad Request` if the request was sent to `add-chain` and the second certificate is a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`).  An unparseable second certificate is left for the origin to reject.
+- `400 Bad Request` if there is a second certificate and the first certificate's issuer name is not byte-identical to the second certificate's subject name (signatures are not verified), or the first certificate's issuer name cannot be parsed.
 
 All other requests (and valid submissions) are forwarded to the origin unchanged.
 

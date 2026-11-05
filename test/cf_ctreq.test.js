@@ -34,13 +34,15 @@ function makeCert({ extensions, subject = Buffer.alloc(100, 0x61) } = {}) {
 }
 
 const b64 = (buf) => buf.toString("base64");
+// A CA certificate whose subject matches the issuer of the other fixtures.
+const makeCA = (extensions) => makeCert({ extensions, subject: Buffer.from("Test CA") });
 // A valid outer SEQUENCE header around filler, for tests that don't need a parseable certificate.
 const der = (content) => Buffer.from([0x30, 0x82, content.length >> 8, content.length & 0xff, ...content]);
 
 const CERT = b64(makeCert());
 const PRECERT = b64(makeCert({ extensions: [POISON_EXT] }));
 const NONCRITICAL = b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00])] }));
-const ISSUER = b64(makeCert());
+const ISSUER = b64(makeCA());
 
 let forwarded;
 beforeEach(() => {
@@ -86,7 +88,25 @@ test("certificate to add-pre-chain is rejected", async () => {
 });
 
 test("only the first certificate is scanned", async () => {
-  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, PRECERT] }));
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, b64(makeCA([POISON_EXT]))] }));
+  assert.equal(res.status, 200);
+});
+
+test("issuer that does not match the second certificate's subject is rejected", async () => {
+  const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
+  for (const [path, first] of [["/ct/v1/add-chain", CERT], ["/ct/v1/add-pre-chain", PRECERT]]) {
+    const res = await snippet.fetch(post(path, { chain: [first, otherCA, ISSUER] }));
+    assert.equal(res.status, 400, path);
+  }
+  assert.equal(forwarded, null);
+});
+
+test("first certificate without a parseable issuer name is rejected when a second certificate is present", async () => {
+  const noNames = b64(seq(seq(tlv(0x02, [1]), tlv(0x04, Array(150).fill(0))), seq(tlv(0x06, [0x2a])), tlv(0x03, [0])));
+  let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [noNames, ISSUER] }));
+  assert.equal(res.status, 400);
+  assert.equal(forwarded, null);
+  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [noNames] }));
   assert.equal(res.status, 200);
 });
 
@@ -128,8 +148,8 @@ test("poison together with an embedded SCT list is rejected", async () => {
 test("precertificate signing certificate is rejected as the issuer on add-chain only", async () => {
   const eku = (...oids) => ext(OID_EKU, false, seq(...oids.map((o) => tlv(0x06, o))));
   const serverAuth = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
-  const psc = b64(makeCert({ extensions: [eku(serverAuth, ctOid(4))] }));
-  const plainEku = b64(makeCert({ extensions: [eku(serverAuth)] }));
+  const psc = b64(makeCA([eku(serverAuth, ctOid(4))]));
+  const plainEku = b64(makeCA([eku(serverAuth)]));
   let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, psc] }));
   assert.equal(res.status, 400);
   assert.equal(forwarded, null);
