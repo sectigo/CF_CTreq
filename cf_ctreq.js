@@ -2,9 +2,9 @@
 // add-chain and add-pre-chain POST requests.
 //
 // Requests to these endpoints must be POST (else 405) with a Content-Type of
-// application/json (else 415) and a Content-Length of at most MAX_BODY_BYTES
-// (else 413). The chain must be a non-empty array of at most MAX_CHAIN_LENGTH
-// base64 strings, each decoding to at least MIN_CERT_BYTES and to a DER
+// application/json (else 415) and a Content-Length of at most CONFIG.maxBodyBytes
+// (else 413). The chain must be a non-empty array of at most CONFIG.maxChainLength
+// base64 strings, each decoding to at least CONFIG.minCertBytes and to a DER
 // SEQUENCE whose declared length matches its actual length (else 400).
 //
 // The first certificate is then parsed down to its extensions (RFC 5280):
@@ -18,6 +18,14 @@
 //   byte-identical to its subject name. Signatures are not verified.
 // Requests that pass these checks are forwarded to the origin unchanged.
 
+const CONFIG = {
+  maxBodyBytes: 128 * 1024,
+  maxChainLength: 10,
+  minCertBytes: 128,
+  // Prefix of the problem details "type" URI; the rejection reason code is appended.
+  problemTypeBase: "https://github.com/sectigo/CF_CTreq#",
+};
+
 // OID contents (without tag and length) as binary strings.
 const OID_CT_POISON = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x03"; // 1.3.6.1.4.1.11129.2.4.3
 const OID_CT_SCT_LIST = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x02"; // 1.3.6.1.4.1.11129.2.4.2
@@ -25,9 +33,6 @@ const OID_CT_PRECERT_SIGNING = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x04"; // 1.
 const OID_EXT_KEY_USAGE = "\x55\x1d\x25"; // 2.5.29.37
 const NULL_VALUE = "\x05\x00";
 
-const MAX_BODY_BYTES = 128 * 1024;
-const MAX_CHAIN_LENGTH = 10;
-const MIN_CERT_BYTES = 128;
 // Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient.
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -149,10 +154,8 @@ function isPrecertSigningCert(cert) {
 // Rejections are RFC 9457 problem details (application/problem+json, itself JSON as
 // RFC 6962 section 4 requires of all responses). The X-CTreq-Reject response header
 // carries the same reason code so that rejections can be analysed in Cloudflare logs.
-const PROBLEM_TYPE_BASE = "https://github.com/sectigo/CF_CTreq#";
-
 function errorResponse(reason, message, status = 400, headers = {}) {
-  const problem = { type: PROBLEM_TYPE_BASE + reason, title: message, status };
+  const problem = { type: CONFIG.problemTypeBase + reason, title: message, status };
   return new Response(JSON.stringify(problem) + "\n", {
     status,
     headers: { "Content-Type": "application/problem+json", "X-CTreq-Reject": reason, ...headers },
@@ -181,7 +184,7 @@ export default {
     }
 
     const contentLength = request.headers.get("Content-Length");
-    if (contentLength !== null && Number(contentLength) > MAX_BODY_BYTES) {
+    if (contentLength !== null && Number(contentLength) > CONFIG.maxBodyBytes) {
       return errorResponse("body-too-large", "request body too large", 413);
     }
 
@@ -196,7 +199,7 @@ export default {
     if (!Array.isArray(chain) || chain.length === 0) {
       return errorResponse("chain-missing", "chain is missing or empty");
     }
-    if (chain.length > MAX_CHAIN_LENGTH) {
+    if (chain.length > CONFIG.maxChainLength) {
       return errorResponse("chain-too-long", "chain has too many entries");
     }
     const certs = [];
@@ -206,7 +209,7 @@ export default {
       }
       // atob() returns a "binary string" (one char per byte).
       const cert = atob(entry);
-      if (cert.length < MIN_CERT_BYTES) {
+      if (cert.length < CONFIG.minCertBytes) {
         return errorResponse("entry-too-short", "chain entry is too short to be a certificate");
       }
       const root = derDecode(cert, 0);
