@@ -96,6 +96,8 @@ Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`
 ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.uri.path, "/ct/v1/add-pre-chain")
 ```
 
+The snippet forwards every request that isn't for an `add-chain` or `add-pre-chain` path unchanged, so a broader rule (up to "All incoming requests") won't cause any additional requests to be rejected.  (Matching only those two paths is recommended though: it avoids running the snippet on other traffic, so that traffic never passes through the snippet's `fetch()`).
+
 ## Testing
 
 Requires Node.js 18 or later (no dependencies):
