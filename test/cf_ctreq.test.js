@@ -45,6 +45,42 @@ const PRECERT = b64(makeCert({ extensions: [POISON_EXT] }));
 const NONCRITICAL = b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00])] }));
 const ISSUER = b64(makeCA());
 
+// With CTREQ_LOG_URL set (e.g. https://ct.example.com/2026h1), requests that the local snippet
+// rejects are also sent to that deployed log, which must reject them identically. Anything the
+// snippet would forward is skipped, so nothing is ever submitted to the log.
+const networkFetch = globalThis.fetch;
+if (process.env.CTREQ_LOG_URL) {
+  const base = new URL(process.env.CTREQ_LOG_URL);
+  let liveTest;
+  beforeEach((t) => {
+    liveTest = t;
+  });
+  const local = snippet.fetch;
+  snippet.fetch = async (req) => {
+    const localRes = await local.call(snippet, req.clone());
+    const reason = localRes.headers.get("X-CTreq-Reject");
+    if (reason === null) {
+      liveTest.diagnostic(`not sent to the log (it would be forwarded): ${req.method} ${new URL(req.url).pathname}`);
+      return localRes;
+    }
+    const url = new URL(base.pathname.replace(/\/$/, "") + new URL(req.url).pathname, base);
+    const headers = new Headers(req.headers);
+    headers.delete("Content-Length");
+    let body;
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      body = await req.clone().text();
+      // A declared Content-Length larger than the body is reproduced by padding the body.
+      const missing = Number(req.headers.get("Content-Length")) - Buffer.byteLength(body);
+      if (missing > 0) body += " ".repeat(missing);
+    }
+    const liveRes = await networkFetch(url, { method: req.method, headers, body, redirect: "manual" });
+    assert.equal(liveRes.headers.get("X-CTreq-Reject"), reason, `${req.method} ${url} responded ${liveRes.status}`);
+    assert.equal(liveRes.status, localRes.status, `${req.method} ${url}`);
+    liveTest.diagnostic(`sent to the log: ${req.method} ${url} => ${liveRes.status} ${reason}`);
+    return liveRes;
+  };
+}
+
 // Print each submitted chain as decoded by openssl under `npm test --verbose` (npm sets
 // npm_config_loglevel) or with CTREQ_VERBOSE set.
 if (process.env.CTREQ_VERBOSE || ["verbose", "silly"].includes(process.env.npm_config_loglevel)) {
