@@ -60,7 +60,7 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 #### cert-unparseable
 
-`400 Bad Request` if the first certificate (or its extensions) cannot be parsed as X.509.
+`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.
 
 #### poison-invalid
 
@@ -80,15 +80,11 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 #### psc-on-add-chain
 
-`400 Bad Request` if the request was sent to `add-chain` and the second certificate is a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`).  An unparseable second certificate is left for the origin to reject.
-
-#### issuer-unparseable
-
-`400 Bad Request` if there is a second certificate and the first certificate's issuer name cannot be parsed.
+`400 Bad Request` if the request was sent to `add-chain` and the second certificate is a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`).
 
 #### issuer-mismatch
 
-`400 Bad Request` if there is a second certificate and the first certificate's issuer name is not byte-identical to the second certificate's subject name.  Signatures are not verified.  An unparseable second certificate is left for the origin to reject.
+`400 Bad Request` if a certificate in `chain` has an issuer name that is not byte-identical to the subject name of the next certificate in `chain`.  Signatures are not verified.
 
 Further checks may be added in the future.
 

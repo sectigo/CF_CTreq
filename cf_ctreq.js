@@ -12,15 +12,16 @@
 // base64 strings, each decoding to at least CONFIG.minCertBytes and to a DER
 // SEQUENCE whose declared length matches its actual length (else 400).
 //
-// The first certificate is then parsed down to its extensions (RFC 5280):
-// - If the CT poison extension (RFC 6962 section 3.1) is present it must be
-//   critical with a NULL value, and only add-pre-chain is permitted.
-//   If it is absent, only add-chain is permitted.
+// Every certificate must then parse as X.509 down to its extensions (RFC 5280),
+// else 400, and:
+// - If the first certificate has the CT poison extension (RFC 6962 section 3.1) it
+//   must be critical with a NULL value, and only add-pre-chain is permitted.
+//   If it does not, only add-chain is permitted.
 // - A poisoned certificate must not also contain an embedded SCT list.
 // - On add-chain, the second certificate must not be a Precertificate Signing
 //   Certificate (RFC 6962 section 3.1), which can only sign precertificates.
-// - If there is a second certificate, the first certificate's issuer name must be
-//   byte-identical to its subject name. Signatures are not verified.
+// - Each certificate's issuer name must be byte-identical to the subject name of
+//   the next certificate in the chain. Signatures are not verified.
 // Requests that pass these checks are forwarded to the origin unchanged.
 
 const CONFIG = {
@@ -90,13 +91,9 @@ function tbsFields(cert) {
   return tbs && tbs.tag === 0x30 ? derChildren(cert, tbs) : null;
 }
 
-// Returns the DER encodings (including headers) of the issuer and subject names,
-// or null if the TBSCertificate is malformed.
-function certNames(cert) {
-  const fields = tbsFields(cert);
-  if (fields === null) {
-    return null;
-  }
+// Returns the DER encodings (including headers) of the issuer and subject names
+// given the TBSCertificate fields, or null if they are not as expected.
+function certNames(cert, fields) {
   const i = fields[0]?.tag === 0xa0 ? 1 : 0; // Skip the optional [0] version.
   const issuer = fields[i + 2]; // After serialNumber and signature.
   const subject = fields[i + 4]; // After validity.
@@ -111,12 +108,8 @@ function certNames(cert) {
 
 // Parses the extensions of an X.509 certificate into { oid, critical, value } entries
 // (value is the DER location of the extnValue contents). Returns [] if the certificate
-// has no extensions, or null if the certificate or its extensions are malformed.
-function certExtensions(cert) {
-  const fields = tbsFields(cert);
-  if (fields === null) {
-    return null;
-  }
+// has no extensions, or null if they are malformed.
+function certExtensions(cert, fields) {
   const wrapper = fields.find((f) => f.tag === 0xa3); // [3] EXPLICIT Extensions
   if (wrapper === undefined) {
     return [];
@@ -145,15 +138,26 @@ function certExtensions(cert) {
   return extensions;
 }
 
-// A malformed certificate is treated as not being one; the origin will reject it.
-function isPrecertSigningCert(cert) {
-  const eku = certExtensions(cert)?.find((e) => e.oid === OID_EXT_KEY_USAGE);
+// Parses a certificate into { der, issuer, subject, extensions }, or returns null if
+// it is not a well-formed X.509 certificate as far as its extensions.
+function parseCert(der) {
+  const fields = tbsFields(der);
+  if (fields === null) {
+    return null;
+  }
+  const names = certNames(der, fields);
+  const extensions = certExtensions(der, fields);
+  return names === null || extensions === null ? null : { der, ...names, extensions };
+}
+
+function isPrecertSigningCert({ der, extensions }) {
+  const eku = extensions.find((e) => e.oid === OID_EXT_KEY_USAGE);
   if (eku === undefined) {
     return false;
   }
-  const list = derDecode(cert, eku.value.offset, eku.value.end);
-  const oids = list !== null && list.tag === 0x30 ? derChildren(cert, list) : null;
-  return oids !== null && oids.some((o) => o.tag === 0x06 && cert.slice(o.offset, o.end) === OID_CT_PRECERT_SIGNING);
+  const list = derDecode(der, eku.value.offset, eku.value.end);
+  const oids = list !== null && list.tag === 0x30 ? derChildren(der, list) : null;
+  return oids !== null && oids.some((o) => o.tag === 0x06 && der.slice(o.offset, o.end) === OID_CT_PRECERT_SIGNING);
 }
 
 // Rejections are RFC 9457 problem details (application/problem+json, itself JSON as
@@ -221,16 +225,17 @@ export default {
       if (root === null || root.tag !== 0x30 || root.end !== cert.length) {
         return errorResponse("entry-not-der", "chain entry is not a DER SEQUENCE of the declared length");
       }
-      certs.push(cert);
+      const parsed = parseCert(cert);
+      if (parsed === null) {
+        return errorResponse("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate");
+      }
+      certs.push(parsed);
     }
 
-    const extensions = certExtensions(certs[0]);
-    if (extensions === null) {
-      return errorResponse("cert-unparseable", "unable to parse the extensions of the first certificate");
-    }
+    const { der: firstDer, extensions } = certs[0];
     const poison = extensions.find((e) => e.oid === OID_CT_POISON);
     if (poison !== undefined) {
-      if (!poison.critical || certs[0].slice(poison.value.offset, poison.value.end) !== NULL_VALUE) {
+      if (!poison.critical || firstDer.slice(poison.value.offset, poison.value.end) !== NULL_VALUE) {
         return errorResponse("poison-invalid", "CT poison extension must be critical and contain NULL");
       }
       if (extensions.some((e) => e.oid === OID_CT_SCT_LIST)) {
@@ -247,15 +252,9 @@ export default {
     if (!isPreChainAPI && certs.length > 1 && isPrecertSigningCert(certs[1])) {
       return errorResponse("psc-on-add-chain", "precertificate signing certificate submitted as the issuer to add-chain");
     }
-    if (certs.length > 1) {
-      const leaf = certNames(certs[0]);
-      if (leaf === null) {
-        return errorResponse("issuer-unparseable", "unable to parse the issuer name of the first certificate");
-      }
-      // An unparseable second certificate is left for the origin to reject.
-      const issuer = certNames(certs[1]);
-      if (issuer !== null && leaf.issuer !== issuer.subject) {
-        return errorResponse("issuer-mismatch", "issuer of the first certificate does not match the subject of the second");
+    for (let i = 0; i + 1 < certs.length; i++) {
+      if (certs[i].issuer !== certs[i + 1].subject) {
+        return errorResponse("issuer-mismatch", "issuer of a certificate does not match the subject of the next certificate in the chain");
       }
     }
 

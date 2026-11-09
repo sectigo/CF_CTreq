@@ -101,13 +101,23 @@ test("issuer that does not match the second certificate's subject is rejected", 
   assert.equal(forwarded, null);
 });
 
-test("first certificate without a parseable issuer name is rejected when a second certificate is present", async () => {
-  const noNames = b64(seq(seq(tlv(0x02, [1]), tlv(0x04, Array(150).fill(0))), seq(tlv(0x06, [0x2a])), tlv(0x03, [0])));
-  let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [noNames, ISSUER] }));
+test("issuer mismatch deeper in the chain is rejected", async () => {
+  const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
+  // ISSUER's issuer is "Test CA", but the next certificate's subject is "Other CA".
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, ISSUER, otherCA] }));
   assert.equal(res.status, 400);
+  assert.equal(res.headers.get("X-CTreq-Reject"), "issuer-mismatch");
   assert.equal(forwarded, null);
-  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [noNames] }));
-  assert.equal(res.status, 200);
+});
+
+test("certificate without parseable names is rejected in any position", async () => {
+  const noNames = b64(seq(seq(tlv(0x02, [1]), tlv(0x04, Array(150).fill(0))), seq(tlv(0x06, [0x2a])), tlv(0x03, [0])));
+  for (const chain of [[noNames], [noNames, ISSUER], [CERT, noNames]]) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
+    assert.equal(res.status, 400);
+    assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable");
+  }
+  assert.equal(forwarded, null);
 });
 
 test("non-critical poison extension is rejected", async () => {
@@ -159,7 +169,7 @@ test("precertificate signing certificate is rejected as the issuer on add-chain 
   assert.equal(res.status, 200);
 });
 
-test("unparseable first certificate is rejected; unparseable issuer is left to the origin", async () => {
+test("unparseable certificates are rejected in any position", async () => {
   const garbage = b64(der(Array(160).fill(0xab)));
   const badExtension = b64(makeCert({ extensions: [seq(tlv(0x04, [1]), tlv(0x04, [2]))] }));
   for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
@@ -168,9 +178,12 @@ test("unparseable first certificate is rejected; unparseable issuer is left to t
       assert.equal(res.status, 400, path);
     }
   }
+  for (const chain of [[CERT, garbage], [CERT, ISSUER, badExtension]]) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
+    assert.equal(res.status, 400);
+    assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable");
+  }
   assert.equal(forwarded, null);
-  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, garbage] }));
-  assert.equal(res.status, 200);
 });
 
 test("every rejection carries an X-CTreq-Reject reason", async () => {
@@ -179,7 +192,6 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
   const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
   const sctList = ext(ctOid(2), false, [0x04, 0x00]);
   const poisonAndSct = b64(makeCert({ extensions: [POISON_EXT, sctList] }));
-  const noNames = b64(seq(seq(tlv(0x02, [1]), tlv(0x04, Array(150).fill(0))), seq(tlv(0x06, [0x2a])), tlv(0x03, [0])));
   const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
   const bigLength = post(ADD, { chain: [CERT] });
   bigLength.headers.set("Content-Length", String(128 * 1024 + 1));
@@ -204,7 +216,6 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
     "precert-on-add-chain": post(ADD, { chain: [PRECERT] }),
     "cert-on-add-pre-chain": post(PRE, { chain: [CERT] }),
     "psc-on-add-chain": post(ADD, { chain: [CERT, psc] }),
-    "issuer-unparseable": post(ADD, { chain: [noNames, ISSUER] }),
     "issuer-mismatch": post(ADD, { chain: [CERT, otherCA] }),
   };
   for (const [reason, req] of Object.entries(cases)) {
