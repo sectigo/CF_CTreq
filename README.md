@@ -103,3 +103,9 @@ Requires Node.js 18 or later (no dependencies):
 ```
 npm test
 ```
+
+To also print every certificate chain the tests submit (decoded with `openssl x509`, which must be installed) and how the snippet responds to it, use npm's verbose flag:
+
+```
+npm test --verbose
+```
