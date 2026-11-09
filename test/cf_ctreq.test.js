@@ -142,7 +142,8 @@ let forwarded;
 beforeEach(() => {
   forwarded = null;
   globalThis.fetch = async (req) => {
-    forwarded = { method: req.method, url: req.url, body: req.method === "POST" ? await req.text() : null };
+    const bytes = req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : null;
+    forwarded = { method: req.method, url: req.url, bytes, body: bytes && new TextDecoder().decode(bytes) };
     return new Response("origin", { status: 200 });
   };
 });
@@ -425,12 +426,60 @@ test("Content-Type parameters and case are accepted", async () => {
 test("oversized Content-Length gets 413 without reading the body", async () => {
   const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
   req.headers.set("Content-Length", String(128 * 1024 + 1));
-  let read = false;
-  req.text = async () => { read = true; return ""; };
   const res = await snippet.fetch(req);
   assert.equal(res.status, 413);
-  assert.equal(read, false);
+  assert.equal(req.bodyUsed, false);
   assert.equal(forwarded, null);
+});
+
+// A body sent in chunks, without a Content-Length.
+function postStream(path, text, chunkSize = 16 * 1024) {
+  const bytes = new TextEncoder().encode(text);
+  let offset = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.length) return controller.close();
+      controller.enqueue(bytes.slice(offset, (offset += chunkSize)));
+    },
+  });
+  return new Request("https://log.example.com" + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    duplex: "half",
+  });
+}
+
+test("oversized body without a Content-Length gets 413", async () => {
+  const body = JSON.stringify({ chain: [CERT, ISSUER], pad: "a".repeat(1024 * 1024) });
+  const req = postStream("/ct/v1/add-chain", body);
+  assert.equal(req.headers.get("Content-Length"), null);
+  const res = await snippet.fetch(req);
+  assert.equal(res.status, 413);
+  assert.equal(res.headers.get("X-CTreq-Reject"), "body-too-large");
+  assert.equal(forwarded, null);
+});
+
+test("body without a Content-Length at the limit is accepted and forwarded", async () => {
+  const json = JSON.stringify({ chain: [CERT, ISSUER] });
+  const body = json + " ".repeat(128 * 1024 - json.length);
+  const res = await snippet.fetch(postStream("/ct/v1/add-chain", body));
+  assert.equal(res.status, 200);
+  assert.equal(forwarded.body, body);
+});
+
+test("forwarded body is byte-identical to the submitted body", async () => {
+  const json = new TextEncoder().encode(JSON.stringify({ chain: [CERT, ISSUER], extra: "\u00e9" }));
+  // A UTF-8 byte order mark and an invalid UTF-8 byte, both of which decoding as text would alter.
+  const original = new Uint8Array([0xef, 0xbb, 0xbf, ...json.slice(0, -2), 0xff, ...json.slice(-2)]);
+  const req = new Request("https://log.example.com/ct/v1/add-chain", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: original,
+  });
+  const res = await snippet.fetch(req);
+  assert.equal(res.status, 200);
+  assert.deepEqual(forwarded.bytes, original);
 });
 
 test("Content-Length at the limit is accepted", async () => {
