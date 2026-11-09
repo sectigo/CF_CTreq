@@ -1,5 +1,6 @@
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import snippet from "../cf_ctreq.js";
 
 // Minimal DER builders; certificates are structurally valid X.509 but have fake signatures.
@@ -43,6 +44,45 @@ const CERT = b64(makeCert());
 const PRECERT = b64(makeCert({ extensions: [POISON_EXT] }));
 const NONCRITICAL = b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00])] }));
 const ISSUER = b64(makeCA());
+
+// Print each submitted chain as decoded by openssl under `npm test --verbose` (npm sets
+// npm_config_loglevel) or with CTREQ_VERBOSE set.
+if (process.env.CTREQ_VERBOSE || ["verbose", "silly"].includes(process.env.npm_config_loglevel)) {
+  const labels = new Map([[CERT, "CERT"], [PRECERT, "PRECERT"], [NONCRITICAL, "NONCRITICAL"], [ISSUER, "ISSUER"]]);
+  const shown = new Set();
+  const pending = [];
+  // Test diagnostics are reported next to the test's result, unlike console output.
+  afterEach((t) => {
+    if (pending.length) t.diagnostic(pending.splice(0).join("\n\n") + "\n");
+  });
+  let unnamed = 0;
+  const decode = (entry) => {
+    const r = spawnSync("openssl", ["x509", "-inform", "DER", "-text", "-noout", "-certopt", "no_pubkey,no_sigdump"], { input: Buffer.from(entry, "base64") });
+    return r.status === 0 ? r.stdout.toString().trimEnd() : "openssl cannot parse this certificate: " + (r.stderr?.toString().trim() || r.error?.message);
+  };
+  const realFetch = snippet.fetch;
+  snippet.fetch = async (req) => {
+    const out = [`${req.method} ${new URL(req.url).pathname}`];
+    let chain;
+    try {
+      chain = JSON.parse(await req.clone().text()).chain;
+    } catch {}
+    for (const [i, entry] of (Array.isArray(chain) ? chain : []).entries()) {
+      if (typeof entry !== "string") {
+        out.push(`chain[${i}]: not a string`);
+        continue;
+      }
+      if (!labels.has(entry)) labels.set(entry, "cert#" + ++unnamed);
+      out.push(`chain[${i}]: ${labels.get(entry)}${shown.has(entry) ? " (decoded above)" : ""}`);
+      if (!shown.has(entry)) out.push(decode(entry));
+      shown.add(entry);
+    }
+    const res = await realFetch.call(snippet, req);
+    out.push(`=> ${res.status} ${res.headers.get("X-CTreq-Reject") ?? "forwarded"}`);
+    pending.push(out.join("\n"));
+    return res;
+  };
+}
 
 let forwarded;
 beforeEach(() => {
