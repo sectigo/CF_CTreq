@@ -56,9 +56,27 @@ if (process.env.CTREQ_VERBOSE || ["verbose", "silly"].includes(process.env.npm_c
     if (pending.length) t.diagnostic(pending.splice(0).join("\n\n") + "\n");
   });
   let unnamed = 0;
+  const hexDump = (buf) => Array.from({ length: Math.ceil(buf.length / 16) }, (_, row) => {
+    const bytes = buf.subarray(row * 16, row * 16 + 16);
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(" ");
+    const ascii = Array.from(bytes, (b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+    return `${(row * 16).toString(16).padStart(8, "0")}  ${hex.padEnd(47)}  |${ascii}|`;
+  }).join("\n");
+  const STRICT_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  // Shown only the first time a certificate appears, since decode() is.
+  const describeFailure = (entry, reason) => {
+    const lines = ["openssl cannot parse this certificate: " + reason, "base64:", ...(entry.match(/[\s\S]{1,64}/g) ?? ["(empty)"])];
+    if (STRICT_BASE64.test(entry)) {
+      const bytes = Buffer.from(entry, "base64");
+      lines.push(`hex (${bytes.length} bytes):`, bytes.length ? hexDump(bytes) : "(empty)");
+    } else {
+      lines.push("(not valid base64, so no hex dump)");
+    }
+    return lines.join("\n");
+  };
   const decode = (entry) => {
     const r = spawnSync("openssl", ["x509", "-inform", "DER", "-text", "-noout", "-certopt", "no_pubkey,no_sigdump"], { input: Buffer.from(entry, "base64") });
-    return r.status === 0 ? r.stdout.toString().trimEnd() : "openssl cannot parse this certificate: " + (r.stderr?.toString().trim() || r.error?.message);
+    return r.status === 0 ? r.stdout.toString().trimEnd() : describeFailure(entry, r.stderr?.toString().trim() || r.error?.message);
   };
   const realFetch = snippet.fetch;
   snippet.fetch = async (req) => {
