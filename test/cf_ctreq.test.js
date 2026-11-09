@@ -87,7 +87,7 @@ test("certificate to add-pre-chain is rejected", async () => {
   assert.equal(forwarded, null);
 });
 
-test("only the first certificate is scanned", async () => {
+test("poison extension in a later certificate does not affect classification", async () => {
   const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, b64(makeCA([POISON_EXT]))] }));
   assert.equal(res.status, 200);
 });
