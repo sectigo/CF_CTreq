@@ -7,10 +7,10 @@
 // add-chain and add-pre-chain POST requests.
 //
 // Requests to these endpoints must be POST (else 405) with a Content-Type of
-// application/json (else 415) and a Content-Length of at most CONFIG.maxBodyBytes
-// (else 413). The chain must be a non-empty array of at most CONFIG.maxChainLength
-// base64 strings, each decoding to at least CONFIG.minCertBytes and to a DER
-// SEQUENCE whose declared length matches its actual length (else 400).
+// application/json (else 415) and a body (and any Content-Length) of at most
+// CONFIG.maxBodyBytes (else 413). The chain must be a non-empty array of at most
+// CONFIG.maxChainLength base64 strings, each decoding to at least CONFIG.minCertBytes
+// and to a DER SEQUENCE whose declared length matches its actual length (else 400).
 //
 // Every certificate must then parse as X.509 down to its extensions (RFC 5280),
 // else 400, and:
@@ -160,6 +160,31 @@ function isPrecertSigningCert({ der, extensions }) {
   return oids !== null && oids.some((o) => o.tag === 0x06 && der.slice(o.offset, o.end) === OID_CT_PRECERT_SIGNING);
 }
 
+// Reads the request body as bytes, or returns null as soon as it exceeds maxBytes, so that
+// a body without a Content-Length (e.g. chunked) is bounded too.
+async function readBody(request, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  if (request.body !== null) {
+    const reader = request.body.getReader();
+    for (let r = await reader.read(); !r.done; r = await reader.read()) {
+      total += r.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(r.value);
+    }
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
 // Rejections are RFC 9457 problem details (application/problem+json, itself JSON as
 // RFC 6962 section 4 requires of all responses). The X-CTreq-Reject response header
 // carries the same reason code so that rejections can be analysed in Cloudflare logs.
@@ -197,11 +222,14 @@ export default {
       return errorResponse("body-too-large", "request body too large", 413);
     }
 
-    const body = await request.text();
+    const body = await readBody(request, CONFIG.maxBodyBytes);
+    if (body === null) {
+      return errorResponse("body-too-large", "request body too large", 413);
+    }
 
     let chain;
     try {
-      chain = JSON.parse(body).chain;
+      chain = JSON.parse(new TextDecoder().decode(body)).chain;
     } catch {
       return errorResponse("invalid-json", "unable to parse request body");
     }
@@ -258,7 +286,7 @@ export default {
       }
     }
 
-    // The original body stream has been consumed, so forward a copy.
+    // The original body stream has been consumed, so forward a copy of its exact bytes.
     return fetch(new Request(request, { body }));
   },
 };

@@ -32,7 +32,7 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 #### body-too-large
 
-`413 Content Too Large` if the `Content-Length` exceeds 128 KiB.  This is checked before the body is read.
+`413 Content Too Large` if the `Content-Length` exceeds 128 KiB, which is checked before the body is read, or if the body itself turns out to exceed 128 KiB (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.
 
 #### invalid-json
 
