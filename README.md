@@ -111,3 +111,13 @@ To also print every certificate chain the tests submit (decoded with `openssl x5
 ```
 npm test --verbose
 ```
+
+### Testing a deployed log
+
+To check a deployed snippet end to end, set `CTREQ_LOG_URL` to the log's base URL (including any path prefix such as a shard name):
+
+```
+CTREQ_LOG_URL=https://ct.example.com/2026h1 npm test
+```
+
+Each request that the local snippet rejects is then also sent to that URL, which must answer with the same status and `X-CTreq-Reject` reason.  Requests that the snippet would forward to the origin are never sent, so nothing is submitted to the log; those cases are only checked locally, and each test reports which requests were sent.  Only the paths under the base URL ending in `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` are used.
