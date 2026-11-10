@@ -38,12 +38,15 @@ const b64 = (buf) => buf.toString("base64");
 // A CA certificate whose subject matches the issuer of the other fixtures.
 const makeCA = (extensions) => makeCert({ extensions, subject: Buffer.from("Test CA") });
 // A valid outer SEQUENCE header around filler, for tests that don't need a parseable certificate.
-const der = (content) => Buffer.from([0x30, 0x82, content.length >> 8, content.length & 0xff, ...content]);
+const der = (content) => tlv(0x30, content);
 
 const CERT = b64(makeCert());
 const PRECERT = b64(makeCert({ extensions: [POISON_EXT] }));
 const NONCRITICAL = b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00])] }));
 const ISSUER = b64(makeCA());
+
+// Requests whose body is streamed without a Content-Length (see postStream).
+const streamed = new WeakSet();
 
 // With CTREQ_LOG_URL set (e.g. https://ct.example.com/2026h1), requests that the local snippet
 // rejects are also sent to that deployed log, which must reject them identically. Anything the
@@ -57,7 +60,11 @@ if (process.env.CTREQ_LOG_URL) {
   });
   const local = snippet.fetch;
   snippet.fetch = async (req) => {
-    const localRes = await local.call(snippet, req.clone());
+    const hasBody = req.method !== "GET" && req.method !== "HEAD";
+    // Copy the body before the snippet reads it: in Node, a clone can't be read once its
+    // twin has been cancelled part-way, as the snippet does with an oversized body.
+    const bytes = hasBody ? new Uint8Array(await req.clone().arrayBuffer()) : null;
+    const localRes = await local.call(snippet, req);
     const reason = localRes.headers.get("X-CTreq-Reject");
     if (reason === null) {
       liveTest.diagnostic(`not sent to the log (it would be forwarded): ${req.method} ${new URL(req.url).pathname}`);
@@ -67,13 +74,19 @@ if (process.env.CTREQ_LOG_URL) {
     const headers = new Headers(req.headers);
     headers.delete("Content-Length");
     let body;
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      body = await req.clone().text();
-      // A declared Content-Length larger than the body is reproduced by padding the body.
-      const missing = Number(req.headers.get("Content-Length")) - Buffer.byteLength(body);
-      if (missing > 0) body += " ".repeat(missing);
+    let duplex;
+    if (hasBody) {
+      if (streamed.has(req)) {
+        // Sent as a stream, so that it reaches the log without a Content-Length too.
+        body = new Blob([bytes]).stream();
+        duplex = "half";
+      } else {
+        // A declared Content-Length larger than the body is reproduced by padding the body.
+        const missing = Number(req.headers.get("Content-Length")) - bytes.length;
+        body = missing > 0 ? new Blob([bytes, " ".repeat(missing)]) : bytes;
+      }
     }
-    const liveRes = await networkFetch(url, { method: req.method, headers, body, redirect: "manual" });
+    const liveRes = await networkFetch(url, { method: req.method, headers, body, duplex, redirect: "manual" });
     assert.equal(liveRes.headers.get("X-CTreq-Reject"), reason, `${req.method} ${url} responded ${liveRes.status}`);
     assert.equal(liveRes.status, localRes.status, `${req.method} ${url}`);
     liveTest.diagnostic(`sent to the log: ${req.method} ${url} => ${liveRes.status} ${reason}`);
@@ -290,21 +303,16 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
   const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
   const bigLength = post(ADD, { chain: [CERT] });
   bigLength.headers.set("Content-Length", String(128 * 1024 + 1));
-  const textPlain = new Request("https://log.example.com" + ADD, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain" },
-    body: "x",
-  });
   const cases = {
     "method-not-allowed": new Request("https://log.example.com" + ADD),
-    "unsupported-media-type": textPlain,
     "body-too-large": bigLength,
     "invalid-json": post(ADD, "not json"),
+    "chain-ambiguous": post(ADD, { chain: [CERT], Chain: [CERT] }),
     "chain-missing": post(ADD, "{}"),
     "chain-too-long": post(ADD, { chain: Array(11).fill(CERT) }),
     "entry-not-base64": post(ADD, { chain: ["!!!"] }),
     "entry-too-short": post(ADD, { chain: [b64(der(Array(100).fill(0xab)))] }),
-    "entry-not-der": post(ADD, { chain: [b64(Buffer.from([0x31, 0x82, 0x00, 0xa0, ...Array(160).fill(0xab)]))] }),
+    "entry-not-der": post(ADD, { chain: [b64(Buffer.from([0x31, 0x81, 0xa0, ...Array(160).fill(0xab)]))] }),
     "cert-unparseable": post(ADD, { chain: [b64(der(Array(160).fill(0xab)))] }),
     "poison-invalid": post(ADD, { chain: [NONCRITICAL] }),
     "poison-with-sct-list": post(PRE, { chain: [poisonAndSct, ISSUER] }),
@@ -357,20 +365,46 @@ test("chain shape violations are rejected", async () => {
 test("entries that are not a DER SEQUENCE of the declared length are rejected", async () => {
   const filler = Array(160).fill(0xab);
   const entries = {
-    "wrong tag": [0x31, 0x82, 0x00, 0xa0, ...filler],
-    "length too large": [0x30, 0x82, 0x00, 0xa1, ...filler],
-    "length too small": [0x30, 0x82, 0x00, 0x9f, ...filler],
+    "wrong tag": [0x31, 0x81, 0xa0, ...filler],
+    "length too large": [0x30, 0x81, 0xa1, ...filler],
+    "length too small": [0x30, 0x81, 0x9f, ...filler],
     "indefinite length": [0x30, 0x80, ...filler],
     "oversized length-of-length": [0x30, 0x85, 0x00, 0x00, 0x00, 0x00, 0xa0, ...filler],
+    "length with a leading zero byte": [0x30, 0x82, 0x00, 0xa0, ...filler],
+    "long form for a short length": [0x30, 0x81, 0x7f, ...filler.slice(0, 0x7f)],
   };
   for (const [name, bytes] of Object.entries(entries)) {
     const b64 = Buffer.from(bytes).toString("base64");
     for (const chain of [[b64], [CERT, b64]]) {
       const res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
       assert.equal(res.status, 400, name);
+      assert.equal(res.headers.get("X-CTreq-Reject"), "entry-not-der", name);
     }
   }
   assert.equal(forwarded, null);
+});
+
+test("non-minimal DER length inside a certificate is rejected", async () => {
+  const cert = makeCert();
+  const tbs = cert.subarray(4);
+  assert.deepEqual([cert[1], tbs[0], tbs[1]], [0x82, 0x30, 0x81], "fixture's TBSCertificate must use a one-byte long-form length");
+  // Re-encode the TBSCertificate's length with a leading zero byte.
+  const padded = seq(Buffer.from([0x30, 0x82, 0x00, tbs[2]]), tbs.subarray(3));
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(padded)] }));
+  assert.equal(res.status, 400);
+  assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable");
+  assert.equal(forwarded, null);
+});
+
+test("extension critical flag must be 0x00 or 0xFF", async () => {
+  const flagged = (flag) => b64(makeCert({ extensions: [seq(tlv(0x06, ctOid(3)), tlv(0x01, [flag]), tlv(0x04, [0x05, 0x00]))] }));
+  let res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [flagged(0x01), ISSUER] }));
+  assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable");
+  res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [flagged(0x00), ISSUER] }));
+  assert.equal(res.headers.get("X-CTreq-Reject"), "poison-invalid");
+  assert.equal(forwarded, null);
+  res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [flagged(0xff), ISSUER] }));
+  assert.equal(res.status, 200);
 });
 
 test("one-byte long-form DER length is accepted", async () => {
@@ -398,29 +432,21 @@ test("non-POST requests to the endpoints get 405", async () => {
   assert.equal(forwarded, null);
 });
 
-test("non-JSON Content-Type gets 415", async () => {
-  for (const contentType of ["text/plain", "application/x-www-form-urlencoded", null]) {
+test("any or no Content-Type is accepted, as the origin does not check it", async () => {
+  const body = JSON.stringify({ chain: [CERT, ISSUER] });
+  for (const contentType of ["application/json", "Application/JSON; charset=utf-8", "text/plain", "application/x-www-form-urlencoded", null]) {
     const headers = contentType ? { "Content-Type": contentType } : {};
     const req = new Request("https://log.example.com/ct/v1/add-chain", {
       method: "POST",
       headers,
-      body: new Uint8Array([0x7b, 0x7d]),
+      body: new TextEncoder().encode(body),
     });
-    if (!contentType) req.headers.delete("Content-Type");
+    assert.equal(req.headers.get("Content-Type"), contentType);
+    forwarded = null;
     const res = await snippet.fetch(req);
-    assert.equal(res.status, 415, String(contentType));
+    assert.equal(res.status, 200, String(contentType));
+    assert.equal(forwarded.body, body, String(contentType));
   }
-  assert.equal(forwarded, null);
-});
-
-test("Content-Type parameters and case are accepted", async () => {
-  const req = new Request("https://log.example.com/ct/v1/add-chain", {
-    method: "POST",
-    headers: { "Content-Type": "Application/JSON; charset=utf-8" },
-    body: JSON.stringify({ chain: [CERT, ISSUER] }),
-  });
-  const res = await snippet.fetch(req);
-  assert.equal(res.status, 200);
 });
 
 test("oversized Content-Length gets 413 without reading the body", async () => {
@@ -442,12 +468,14 @@ function postStream(path, text, chunkSize = 16 * 1024) {
       controller.enqueue(bytes.slice(offset, (offset += chunkSize)));
     },
   });
-  return new Request("https://log.example.com" + path, {
+  const req = new Request("https://log.example.com" + path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
     duplex: "half",
   });
+  streamed.add(req);
+  return req;
 }
 
 test("oversized body without a Content-Length gets 413", async () => {
@@ -468,18 +496,63 @@ test("body without a Content-Length at the limit is accepted and forwarded", asy
   assert.equal(forwarded.body, body);
 });
 
+const postBytes = (path, bytes) =>
+  new Request("https://log.example.com" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: bytes });
+
 test("forwarded body is byte-identical to the submitted body", async () => {
   const json = new TextEncoder().encode(JSON.stringify({ chain: [CERT, ISSUER], extra: "\u00e9" }));
-  // A UTF-8 byte order mark and an invalid UTF-8 byte, both of which decoding as text would alter.
-  const original = new Uint8Array([0xef, 0xbb, 0xbf, ...json.slice(0, -2), 0xff, ...json.slice(-2)]);
-  const req = new Request("https://log.example.com/ct/v1/add-chain", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: original,
-  });
-  const res = await snippet.fetch(req);
+  // An invalid UTF-8 byte inside a string, which decoding as text would replace.
+  const original = new Uint8Array([...json.slice(0, -2), 0xff, ...json.slice(-2)]);
+  const res = await snippet.fetch(postBytes("/ct/v1/add-chain", original));
   assert.equal(res.status, 200);
   assert.deepEqual(forwarded.bytes, original);
+});
+
+test("body with a UTF-8 byte order mark is invalid JSON, as for the origin", async () => {
+  const json = new TextEncoder().encode(JSON.stringify({ chain: [CERT, ISSUER] }));
+  const res = await snippet.fetch(postBytes("/ct/v1/add-chain", new Uint8Array([0xef, 0xbb, 0xbf, ...json])));
+  assert.equal(res.headers.get("X-CTreq-Reject"), "invalid-json");
+  assert.equal(forwarded, null);
+});
+
+test("chain key is matched case-insensitively, as by the origin", async () => {
+  for (const key of ["Chain", "CHAIN", "cHaIn"]) {
+    const body = JSON.stringify({ [key]: [CERT, ISSUER] });
+    forwarded = null;
+    const res = await snippet.fetch(post("/ct/v1/add-chain", body));
+    assert.equal(res.status, 200, key);
+    assert.equal(forwarded.body, body, key);
+  }
+  forwarded = null;
+  // Only ASCII letters are folded: dotless i (U+0131) and a Cyrillic "а" (U+0430) don't match.
+  for (const key of ["cha\u0131n", "ch\u0430in"]) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", { [key]: [CERT, ISSUER] }));
+    assert.equal(res.headers.get("X-CTreq-Reject"), "chain-missing", key);
+  }
+  // Whichever variant Go would use, the snippet must not check a different one.
+  for (const body of [{ chain: [CERT, ISSUER], CHAIN: [PRECERT] }, { Chain: [PRECERT], chain: [CERT, ISSUER] }]) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", body));
+    assert.equal(res.headers.get("X-CTreq-Reject"), "chain-ambiguous", Object.keys(body).join());
+  }
+  assert.equal(forwarded, null);
+});
+
+test("line breaks in base64 chain entries are ignored, as by the origin", async () => {
+  const wrap = (s, eol) => s.match(/.{1,64}/g).join(eol) + eol;
+  for (const eol of ["\n", "\r\n", "\r"]) {
+    const body = JSON.stringify({ chain: [wrap(CERT, eol), wrap(ISSUER, eol)] });
+    forwarded = null;
+    const res = await snippet.fetch(post("/ct/v1/add-chain", body));
+    assert.equal(res.status, 200, JSON.stringify(eol));
+    assert.equal(forwarded.body, body);
+  }
+  forwarded = null;
+  // Other whitespace is still rejected, as Go's base64 decoder does.
+  for (const sep of [" ", "\t"]) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [wrap(CERT, sep)] }));
+    assert.equal(res.headers.get("X-CTreq-Reject"), "entry-not-base64", JSON.stringify(sep));
+  }
+  assert.equal(forwarded, null);
 });
 
 test("Content-Length at the limit is accepted", async () => {
