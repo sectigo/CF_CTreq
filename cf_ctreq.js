@@ -79,6 +79,44 @@ const LINE_BREAKS = /[\r\n]/g;
 // Go's encoding/json matches keys to struct fields case-insensitively. The /i flag
 // without /u folds ASCII letters only, which is all that Go folds onto "chain".
 const CHAIN_KEY = /^chain$/i;
+const JSON_WHITESPACE = " \t\n\r";
+
+// Returns the last top-level key in the text of a JSON object (already known to be
+// valid JSON) that Go's encoding/json would decode into the "chain" field, or
+// undefined. Go uses the last of several such keys, whatever their case. JSON.parse()
+// keeps the last value of each key, but doesn't reveal the order of keys that differ
+// only in case, so the order is found by scanning the text.
+function lastChainKey(text) {
+  let last;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      const start = i;
+      for (i++; text[i] !== '"'; i++) {
+        if (text[i] === "\\") {
+          i++;
+        }
+      }
+      let next = i + 1;
+      while (JSON_WHITESPACE.includes(text[next])) {
+        next++;
+      }
+      // A string at depth 1 followed by a colon is a top-level key.
+      if (depth === 1 && text[next] === ":") {
+        const key = JSON.parse(text.slice(start, i + 1));
+        if (CHAIN_KEY.test(key)) {
+          last = key;
+        }
+      }
+    } else if (c === "{" || c === "[") {
+      depth++;
+    } else if (c === "}" || c === "]") {
+      depth--;
+    }
+  }
+  return last;
+}
 
 // Decodes the DER TLV header at index i of a binary string. Returns null if the
 // header is malformed (including a length that is not minimally encoded, which Go's
@@ -383,10 +421,11 @@ async function readBody(request, maxBytes) {
 // RFC 6962 section 4 requires of all responses). The X-CTreq-Reject response header
 // carries the same reason code so that rejections can be analysed in Cloudflare logs.
 // If any of the environment's origins allows any origin in its responses (as Sunlight
-// does, so that browsers can read them), rejections do too.
+// does, so that browsers can read them), rejections do too, except 405 responses,
+// which Sunlight's router sends without it.
 function errorResponse({ reason, message, status, headers }, origins) {
   const problem = { type: CONFIG.problemTypeBase + reason, title: message, status };
-  const cors = origins.some((o) => o.allowsAnyOrigin) ? { "Access-Control-Allow-Origin": "*" } : {};
+  const cors = status !== 405 && origins.some((o) => o.allowsAnyOrigin) ? { "Access-Control-Allow-Origin": "*" } : {};
   return new Response(JSON.stringify(problem) + "\n", {
     status,
     headers: { "Content-Type": "application/problem+json", "X-CTreq-Reject": reason, ...cors, ...headers },
@@ -406,20 +445,19 @@ function methodRejection(origins, method) {
 // Returns the rejection, if any, for a request body, or the chain's DER certificates
 // (as binary strings) if the body should be checked further.
 function bodyRejectionOrChain(body) {
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(body);
   let json;
   try {
-    // Keep any BOM so that JSON.parse rejects it, as Go's encoding/json does.
-    json = JSON.parse(new TextDecoder("utf-8", { ignoreBOM: true }).decode(body));
+    // Any BOM is kept so that JSON.parse rejects it, as Go's encoding/json does.
+    json = JSON.parse(text);
   } catch {
     return rejection("invalid-json", "unable to parse request body");
   }
-  const chainKeys = json !== null && typeof json === "object" ? Object.keys(json).filter((k) => CHAIN_KEY.test(k)) : [];
-  // Go would use whichever such key comes last in the body, which JSON.parse can't
-  // reveal when their cases differ, so a request with more than one is rejected.
-  if (chainKeys.length > 1) {
-    return rejection("chain-ambiguous", "more than one chain key, differing only in case");
-  }
-  const chain = chainKeys.length === 1 ? json[chainKeys[0]] : undefined;
+  // As in Go, if there's more than one chain key (differing only in case), the last is
+  // used. (Go also rejects the request if an earlier one isn't a valid chain, but the
+  // snippet doesn't check those.)
+  const chainKey = json !== null && typeof json === "object" && !Array.isArray(json) ? lastChainKey(text) : undefined;
+  const chain = chainKey === undefined ? undefined : json[chainKey];
   if (!Array.isArray(chain) || chain.length === 0) {
     return rejection("chain-missing", "chain is missing or empty");
   }
