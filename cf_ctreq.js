@@ -191,6 +191,24 @@ function parseCert(der) {
   };
 }
 
+// Returns true for an add-pre-chain path, false for an add-chain path, or null for any
+// other path. As Go's http.ServeMux (used by the origin) does, each path segment is
+// percent-decoded before matching, so e.g. "add%2Dchain" is add-chain, but
+// "ct%2Fv1" is a single segment.
+function isPreChainPath(pathname) {
+  let segments;
+  try {
+    segments = pathname.split("/").slice(-3).map(decodeURIComponent);
+  } catch {
+    return null; // Invalid percent-encoding, which Go rejects.
+  }
+  const [ct, v1, endpoint] = segments;
+  if (ct !== "ct" || v1 !== "v1") {
+    return null;
+  }
+  return endpoint === "add-pre-chain" ? true : endpoint === "add-chain" ? false : null;
+}
+
 // Reads the request body as bytes, or returns null as soon as it exceeds maxBytes, so that
 // a body without a Content-Length (e.g. chunked) is bounded too.
 async function readBody(request, maxBytes) {
@@ -229,13 +247,8 @@ function errorResponse(reason, message, status = 400, headers = {}) {
 
 export default {
   async fetch(request) {
-    const path = new URL(request.url).pathname;
-    let isPreChainAPI;
-    if (path.endsWith("/ct/v1/add-chain")) {
-      isPreChainAPI = false;
-    } else if (path.endsWith("/ct/v1/add-pre-chain")) {
-      isPreChainAPI = true;
-    } else {
+    const isPreChainAPI = isPreChainPath(new URL(request.url).pathname);
+    if (isPreChainAPI === null) {
       return fetch(request);
     }
 

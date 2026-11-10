@@ -10,7 +10,7 @@ A large volume of malformed log API requests might overwhelm the origin's error 
 
 ## How does it work?
 
-Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below are set in the `CONFIG` object at the top of [`cf_ctreq.js`](cf_ctreq.js).
+Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  As the origin's router (Go's `http.ServeMux`) does, each segment of the path is percent-decoded before matching, so e.g. `/ct/v1/add%2Dchain` is also checked.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below are set in the `CONFIG` object at the top of [`cf_ctreq.js`](cf_ctreq.js).
 
 The body is interpreted as the target origin ([TesseraCT](https://github.com/transparency-dev/tesseract), which uses Go's `encoding/json` and `crypto/x509`) would interpret it, so that the snippet neither rejects a request that the origin would accept nor checks a different chain from the one the origin would use.  For example, the `Content-Type` is not checked, the `chain` key is matched regardless of the case of its letters, and line breaks in base64 are ignored.
 
@@ -103,6 +103,8 @@ ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.u
 ```
 
 The snippet forwards every request that isn't for an `add-chain` or `add-pre-chain` path unchanged, so a broader rule (up to "All incoming requests") won't cause any additional requests to be rejected.  (Matching only those two paths is recommended though: it avoids running the snippet on other traffic, so that traffic never passes through the snippet's `fetch()`).
+
+Keep **Normalize incoming URLs** turned on (under **Rules** > **Settings** > **URL Normalization**; it is on by default).  The origin also routes percent-encoded forms of these paths, such as `/ct/v1/add%2Dchain`, to the same endpoints, and [URL normalization](https://developers.cloudflare.com/rules/normalization/how-it-works/) decodes them before the rule above is evaluated.  If it were turned off, the rule wouldn't match them, so they would reach the origin without being checked.
 
 ## Monitoring rejections
 
