@@ -46,7 +46,7 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 {"type":"https://github.com/sectigo/CF_CTreq#poison-invalid","title":"CT poison extension must be critical and contain NULL","status":400}
 ```
 
-In the `sunlight` and `common` environments, rejection responses also have an `Access-Control-Allow-Origin: *` header, as Sunlight's responses do, so that browser-based clients can read them.
+In the `sunlight` and `common` environments, rejection responses (other than `405` ones, which Sunlight's router sends without it) also have an `Access-Control-Allow-Origin: *` header, as Sunlight's responses do, so that browser-based clients can read them.
 
 ### Rejection reasons
 
@@ -62,13 +62,9 @@ In the `sunlight` and `common` environments, rejection responses also have an `A
 
 `400 Bad Request` if the body is not valid JSON (including when it starts with a byte order mark).
 
-#### chain-ambiguous
-
-`400 Bad Request` if the body has more than one key that matches `chain` regardless of case (e.g. both `chain` and `Chain`).  The origin would use whichever comes last, which the snippet cannot reliably determine.
-
 #### chain-missing
 
-`400 Bad Request` if `chain` (matched regardless of case) is missing, is not an array, or is empty.
+`400 Bad Request` if `chain` is missing, is not an array, or is empty.  As for the origin, `chain` is matched regardless of the case of its letters, and if there is more than one such key (e.g. both `chain` and `Chain`), the last one is used.  (The origin would also reject the request if an earlier one isn't a valid chain, but the snippet doesn't check those.)
 
 #### chain-too-long
 

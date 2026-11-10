@@ -431,7 +431,6 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
     "method-not-allowed": new Request("https://log.example.com" + ADD),
     "body-too-large": bigLength,
     "invalid-json": post(ADD, "not json"),
-    "chain-ambiguous": post(ADD, { chain: [CERT], Chain: [CERT] }),
     "chain-missing": post(ADD, "{}"),
     "chain-too-long": post(ADD, { chain: Array(11).fill(CERT) }),
     "entry-not-base64": post(ADD, { chain: ["!!!"] }),
@@ -569,6 +568,10 @@ test("non-POST requests to the endpoints get 405, except OPTIONS for Sunlight", 
 test("rejections allow any origin, as Sunlight's responses do, if Sunlight may be the origin", async () => {
   const res = await snippet.fetch(post("/ct/v1/add-chain", "not json"));
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), expected({ tesseract: null, sunlight: "*", trillian: null, common: "*" }));
+  // Except 405 responses, which Sunlight's router sends without it.
+  const wrongMethod = await snippet.fetch(new Request("https://log.example.com/ct/v1/add-chain", { method: "GET" }));
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get("Access-Control-Allow-Origin"), null);
 });
 
 test("environments differ only as documented", async () => {
@@ -693,12 +696,32 @@ test("chain key is matched case-insensitively, as by the origin", async () => {
     const res = await snippet.fetch(post("/ct/v1/add-chain", { [key]: [CERT, ISSUER] }));
     assert.equal(res.headers.get("X-CTreq-Reject"), "chain-missing", key);
   }
-  // Whichever variant Go would use, the snippet must not check a different one.
-  for (const body of [{ chain: [CERT, ISSUER], CHAIN: [PRECERT] }, { Chain: [PRECERT], chain: [CERT, ISSUER] }]) {
-    const res = await snippet.fetch(post("/ct/v1/add-chain", body));
-    assert.equal(res.headers.get("X-CTreq-Reject"), "chain-ambiguous", Object.keys(body).join());
-  }
   assert.equal(forwarded, null);
+});
+
+test("the last chain key is used, whatever its case, as by the origin", async () => {
+  const bodies = {
+    // The last key's chain is checked: a precertificate, rejected on add-chain.
+    [`{"chain":[${JSON.stringify(CERT)},${JSON.stringify(ISSUER)}],"CHAIN":[${JSON.stringify(PRECERT)}]}`]: "precert-on-add-chain",
+    [`{"Chain":[${JSON.stringify(PRECERT)}],"chain":[${JSON.stringify(CERT)},${JSON.stringify(ISSUER)}]}`]: "forwarded",
+    // A repeated key, separated by one differing in case: the last occurrence counts.
+    [`{"chain":[${JSON.stringify(PRECERT)}],"CHAIN":[${JSON.stringify(PRECERT)}],"chain":[${JSON.stringify(CERT)}]}`]: "forwarded",
+    [`{"chain":[${JSON.stringify(CERT)}],"CHAIN":[${JSON.stringify(CERT)}],"chain":[${JSON.stringify(PRECERT)}]}`]: "precert-on-add-chain",
+    // Keys in nested objects, and strings that merely look like keys, don't count.
+    [`{"Chain":[${JSON.stringify(CERT)}],"x":{"chain":[${JSON.stringify(PRECERT)}]},"y":["chain",":"]}`]: "forwarded",
+    // Escapes in keys and whitespace before the colon.
+    [`{"chain":[${JSON.stringify(CERT)}], "\\u0043HAIN" \n : [${JSON.stringify(PRECERT)}]}`]: "precert-on-add-chain",
+    // A null last chain, as Go sees it, is empty.
+    [`{"chain":[${JSON.stringify(CERT)}],"Chain":null}`]: "chain-missing",
+  };
+  for (const [body, want] of Object.entries(bodies)) {
+    forwarded = null;
+    const res = await snippet.fetch(post("/ct/v1/add-chain", body));
+    assert.equal(outcome(res), want, body.replace(/"[A-Za-z0-9+/=]{100,}"/g, "…"));
+    if (want === "forwarded") {
+      assert.equal(forwarded.body, body);
+    }
+  }
 });
 
 test("line breaks in base64 chain entries are ignored, as by the origin", async () => {
