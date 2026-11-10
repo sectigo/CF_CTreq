@@ -10,7 +10,7 @@ A large volume of malformed log API requests might overwhelm the origin's error 
 
 ## How does it work?
 
-Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  As the origin's router (Go's `http.ServeMux`, in both TesseraCT and Sunlight) does, each segment of the path is percent-decoded before matching, so e.g. `/ct/v1/add%2Dchain` is also checked.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below, and the [origin environment](#origin-environment), are set in the `CONFIG` object at the top of [`cf_ctreq.js`](cf_ctreq.js).
+Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  As the origin's router (Go's `http.ServeMux`, in TesseraCT, Sunlight and Trillian) does, each segment of the path is percent-decoded before matching, so e.g. `/ct/v1/add%2Dchain` is also checked.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below, and the [origin environment](#origin-environment), are set in the `CONFIG` object at the top of [`cf_ctreq.js`](cf_ctreq.js).
 
 The body is interpreted as the origin would interpret it, so that the snippet neither rejects a request that the origin would accept nor checks a different chain from the one the origin would use.  For example, the `Content-Type` is not checked, the `chain` key is matched regardless of the case of its letters, and line breaks in base64 are ignored.
 
@@ -20,21 +20,22 @@ The origins differ slightly in what they reject, so `CONFIG.environment` selects
 
 | `environment` | Rejects |
 |---|---|
-| `common` (default) | Only what both TesseraCT and Sunlight would reject, so it is safe in front of either. |
+| `common` (default) | Only what TesseraCT, Sunlight and Trillian would all reject, so it is safe in front of any of them. |
 | `tesseract` | What [TesseraCT](https://github.com/transparency-dev/tesseract) would reject (it uses Go's `encoding/json` and `crypto/x509`). |
 | `sunlight` | What [Sunlight](https://github.com/FiloSottile/sunlight) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
+| `trillian` | What the [Trillian](https://github.com/google/certificate-transparency-go/tree/master/trillian) CT front end (CTFE) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 
-Both origins parse the request body in the same way, but they differ as follows, so these checks depend on the environment:
+All the origins parse the request body in the same way, but they differ as follows, so these checks depend on the environment:
 
-| Request | TesseraCT | Sunlight | `common` |
-|---|---|---|---|
-| `OPTIONS` (CORS preflight) | `method-not-allowed` | answered by Sunlight | forwarded |
-| Certificate whose version is not v1, v2 or v3, or is not minimally encoded | `cert-unparseable` | accepted | forwarded |
-| Certificate with two extensions of the same type | `cert-unparseable` | accepted | forwarded |
-| Extensions in a v1 or v2 certificate | ignored | read, as in a v3 certificate | forwarded, unless both would reject the request regardless |
-| Precertificate issued by a Precertificate Signing Certificate | accepted | `psc-not-supported` | forwarded |
+| Request | TesseraCT | Sunlight | Trillian | `common` |
+|---|---|---|---|---|
+| `OPTIONS` (CORS preflight) | `method-not-allowed` | answered by Sunlight | `method-not-allowed` | forwarded |
+| Certificate whose version is not v1, v2 or v3, or is not minimally encoded | `cert-unparseable` | accepted | accepted | forwarded |
+| Certificate with two extensions of the same type | `cert-unparseable` | accepted | accepted | forwarded |
+| Extensions in a v1 or v2 certificate | ignored | read, as in a v3 certificate | read, as in a v3 certificate | forwarded, unless all would reject the request regardless |
+| Precertificate issued by a Precertificate Signing Certificate | accepted | `psc-not-supported` | accepted | forwarded |
 
-In the `common` environment, the snippet checks the request against each origin's criteria, and only rejects it if both would, with the TesseraCT reason.
+In the `common` environment, the snippet checks the request against each origin's criteria, and only rejects it if all of them would, with the TesseraCT reason.
 
 ### Rejection responses
 
@@ -44,13 +45,13 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 {"type":"https://github.com/sectigo/CF_CTreq#poison-invalid","title":"CT poison extension must be critical and contain NULL","status":400}
 ```
 
-Unless the environment is `tesseract`, rejection responses also have an `Access-Control-Allow-Origin: *` header, as Sunlight's responses do, so that browser-based clients can read them.
+In the `sunlight` and `common` environments, rejection responses also have an `Access-Control-Allow-Origin: *` header, as Sunlight's responses do, so that browser-based clients can read them.
 
 ### Rejection reasons
 
 #### method-not-allowed
 
-`405 Method Not Allowed`, with an `Allow` header, if the method is not `POST` (or, unless the environment is `tesseract`, `OPTIONS`).
+`405 Method Not Allowed`, with an `Allow` header, if the method is not `POST` (or, in the `sunlight` and `common` environments, `OPTIONS`).
 
 #### body-too-large
 
@@ -112,18 +113,18 @@ Unless the environment is `tesseract`, rejection responses also have an `Access-
 
 As far as possible, the snippet aims to only reject requests that the origin would also reject, so that it never stops a submission from being logged.  Further checks may be added in the future, but the following checks are deliberately not done:
 
-- **`Content-Type`**: RFC 6962 doesn't require a particular `Content-Type`, and neither origin checks it, so a client that omits it or sends e.g. `text/plain` must still succeed.
+- **`Content-Type`**: RFC 6962 doesn't require a particular `Content-Type`, and none of the origins checks it, so a client that omits it or sends e.g. `text/plain` must still succeed.
 - **Signatures, and chaining to an accepted root**: verifying signatures needs the public key algorithms and the log's root list, and is the most expensive part of chain validation, so it is left to the origin.  `issuer-mismatch` only compares names.
-- **The log's acceptance policy**: TesseraCT can be configured to reject certificates by expiry date (`not_after_start`, `not_after_limit`, `reject_expired`, `reject_unexpired`), extended key usage, extension, intermediate, or SHA-1 signature; Sunlight can be configured to reject them by expiry date, or by blocked public key, and requires the first certificate to have the `serverAuth` extended key usage (or, for a log of mark certificates, the Verified Mark Certificate one).  Repeating these checks would duplicate each log's configuration in the snippet, where it could drift out of sync.
-- **Precertificate Signing Certificate as the issuer on `add-chain`**: RFC 6962 says that a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`) can only sign precertificates, so a certificate that one has issued is misissued.  But neither origin checks extended key usage along the chain (TesseraCT's [`lax509`](https://github.com/transparency-dev/tesseract/blob/main/internal/lax509/README.md) deliberately skips it, so that misissued certificates can be logged and thereby discovered).  On `add-pre-chain`, only Sunlight rejects one ([`psc-not-supported`](#psc-not-supported)).
-- **Embedded SCT list in a precertificate**: a precertificate with an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`) makes little sense, but neither origin rejects one.
-- **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm, validity, public key and signature are not checked, and nor is anything after the extensions or after an extension's value (which both origins also ignore).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
+- **The log's acceptance policy**: TesseraCT can be configured to reject certificates by expiry date (`not_after_start`, `not_after_limit`, `reject_expired`, `reject_unexpired`), extended key usage, extension, intermediate, or SHA-1 signature; Trillian similarly by expiry date, extended key usage, extension, intermediate, or (to accept only CA certificates) the CA flag; and Sunlight by expiry date, or by blocked public key, and it requires the first certificate to have the `serverAuth` extended key usage (or, for a log of mark certificates, the Verified Mark Certificate one).  Repeating these checks would duplicate each log's configuration in the snippet, where it could drift out of sync.
+- **Precertificate Signing Certificate as the issuer on `add-chain`**: RFC 6962 says that a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`) can only sign precertificates, so a certificate that one has issued is misissued.  But none of the origins checks extended key usage along the chain (TesseraCT's [`lax509`](https://github.com/transparency-dev/tesseract/blob/main/internal/lax509/README.md) deliberately skips it, so that misissued certificates can be logged and thereby discovered).  On `add-pre-chain`, only Sunlight rejects one ([`psc-not-supported`](#psc-not-supported)).
+- **Embedded SCT list in a precertificate**: a precertificate with an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`) makes little sense, but none of the origins rejects one.
+- **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm, validity, public key and signature are not checked, and nor is anything after the extensions or after an extension's value (which all the origins also ignore).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
 
-The snippet's `CONFIG` limits are stricter than the origins' defaults: TesseraCT accepts a body of up to 512 KiB (Sunlight, 128 KiB) and both accept any number of chain entries, whereas the snippet's limits are 128 KiB (`body-too-large`) and 10 entries (`chain-too-long`), which are enough for real certificate chains.  Neither origin has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
+The snippet's `CONFIG` limits are stricter than the origins' defaults: TesseraCT accepts a body of up to 512 KiB (Trillian, 512,000 bytes; Sunlight, 128 KiB) and all of them accept any number of chain entries, whereas the snippet's limits are 128 KiB (`body-too-large`) and 10 entries (`chain-too-long`), which are enough for real certificate chains.  None of the origins has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
 
 ## Deployment
 
-Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract` or `sunlight` if the log runs that software (or leaving it as `common`; see [Origin environment](#origin-environment)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
+Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leaving it as `common`; see [Origin environment](#origin-environment)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
 
 ```
 ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.uri.path, "/ct/v1/add-pre-chain")
@@ -207,7 +208,7 @@ The tests use the snippet's own `CONFIG.environment`, unless `CTREQ_ENVIRONMENT`
 CTREQ_ENVIRONMENT=sunlight npm test
 ```
 
-Whichever environment is selected, one test also checks the differences between all three.
+Whichever environment is selected, one test also checks the differences between all of them.
 
 ### Testing a deployed log
 

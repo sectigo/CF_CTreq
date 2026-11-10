@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-// CTREQ_ENVIRONMENT selects CONFIG.environment ("tesseract", "sunlight" or "common")
+// CTREQ_ENVIRONMENT selects CONFIG.environment ("sunlight", "tesseract", "trillian", or "common")
 // for the snippet under test; by default, the snippet's own setting is tested. Another
 // setting is applied to a copy of the source, so that CONFIG needn't be exported.
 const SOURCE = readFileSync(new URL("../cf_ctreq.js", import.meta.url), "utf8");
@@ -293,24 +293,24 @@ test("precertificate signing certificate as the issuer is only rejected by Sunli
   const psc = b64(makeCA([eku(serverAuth, ctOid(4))]));
   assert.equal(outcome(await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, psc] }))), "forwarded");
   const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }));
-  assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "psc-not-supported", common: "forwarded" }));
+  assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }));
   // Only an extended key usage extension that Sunlight can parse counts.
   const unparseableEku = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4)), Buffer.from([0x05, 0x00])))]));
   assert.equal(outcome(await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, unparseableEku] }))), "forwarded");
 });
 
-test("extensions in v1 and v2 certificates are only read by Sunlight", async () => {
+test("extensions in v1 and v2 certificates are only read by Sunlight and Trillian", async () => {
   const malformed = seq(tlv(0x04, [1]), tlv(0x04, [2]));
   // v1 (no version field, or explicitly 0) and v2.
   for (const version of [null, [0], [1]]) {
     const label = JSON.stringify(version);
     const poisoned = b64(makeCert({ version, extensions: [POISON_EXT] }));
     let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [poisoned, ISSUER] }));
-    assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "precert-on-add-chain", common: "forwarded" }), label);
+    assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "forwarded" }), label);
     res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [poisoned, ISSUER] }));
-    assert.equal(outcome(res), expected({ tesseract: "cert-on-add-pre-chain", sunlight: "forwarded", common: "forwarded" }), label);
+    assert.equal(outcome(res), expected({ tesseract: "cert-on-add-pre-chain", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }), label);
     res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ version, extensions: [malformed] })), ISSUER] }));
-    assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "cert-unparseable", common: "forwarded" }), label);
+    assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "cert-unparseable", trillian: "cert-unparseable", common: "forwarded" }), label);
   }
 });
 
@@ -318,7 +318,7 @@ test("unknown or malformed certificate versions are only rejected by TesseraCT",
   // v4, negative, and non-minimally encoded.
   for (const version of [[3], [0xff], [0x00, 0x02]]) {
     const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ version })), ISSUER] }));
-    assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", common: "forwarded" }), JSON.stringify(version));
+    assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }), JSON.stringify(version));
   }
 });
 
@@ -370,7 +370,7 @@ test("malformed fields that the origin's X.509 parser reads are rejected", async
 test("duplicate extensions are only rejected by TesseraCT", async () => {
   const duplicated = b64(makeCert({ extensions: [POISON_EXT, POISON_EXT] }));
   const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [duplicated, ISSUER] }));
-  assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", common: "forwarded" }));
+  assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
 });
 
 test("unparseable certificates are rejected in any position", async () => {
@@ -517,12 +517,12 @@ test("maximum chain length and extra top-level fields are accepted", async () =>
 });
 
 test("non-POST requests to the endpoints get 405, except OPTIONS for Sunlight", async () => {
-  const allow = expected({ tesseract: "POST", sunlight: "OPTIONS, POST", common: "OPTIONS, POST" });
+  const allow = expected({ tesseract: "POST", sunlight: "OPTIONS, POST", trillian: "POST", common: "OPTIONS, POST" });
   for (const method of ["GET", "PUT", "DELETE", "OPTIONS"]) {
     for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
       forwarded = null;
       const res = await snippet.fetch(new Request("https://log.example.com" + path, { method }));
-      if (method === "OPTIONS" && ENVIRONMENT !== "tesseract") {
+      if (method === "OPTIONS" && ["sunlight", "common"].includes(ENVIRONMENT)) {
         // Sunlight answers CORS preflight requests itself.
         assert.equal(res.status, 200, method + " " + path);
         assert.equal(forwarded.method, "OPTIONS");
@@ -535,32 +535,34 @@ test("non-POST requests to the endpoints get 405, except OPTIONS for Sunlight", 
   }
 });
 
-test("rejections allow any origin, as Sunlight's do, unless the environment is TesseraCT", async () => {
+test("rejections allow any origin, as Sunlight's responses do, if Sunlight may be the origin", async () => {
   const res = await snippet.fetch(post("/ct/v1/add-chain", "not json"));
-  assert.equal(res.headers.get("Access-Control-Allow-Origin"), expected({ tesseract: null, sunlight: "*", common: "*" }));
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), expected({ tesseract: null, sunlight: "*", trillian: null, common: "*" }));
 });
 
 test("environments differ only as documented", async () => {
-  const snippets = Object.fromEntries(await Promise.all(["tesseract", "sunlight", "common"].map(async (e) => [e, await loadSnippet(e)])));
+  const snippets = Object.fromEntries(await Promise.all(["tesseract", "sunlight", "trillian", "common"].map(async (e) => [e, await loadSnippet(e)])));
   const outcomes = async (makeRequest) =>
     Object.fromEntries(await Promise.all(Object.entries(snippets).map(async ([e, s]) => [e, outcome(await s.fetch(makeRequest()))])));
   const v1Poisoned = b64(makeCert({ version: null, extensions: [POISON_EXT] }));
   const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
   const cases = [
-    [() => new Request("https://log.example.com/ct/v1/add-chain", { method: "OPTIONS" }), { tesseract: "method-not-allowed", sunlight: "forwarded", common: "forwarded" }],
-    [() => post("/ct/v1/add-chain", { chain: [b64(makeCert({ version: [3] }))] }), { tesseract: "cert-unparseable", sunlight: "forwarded", common: "forwarded" }],
-    [() => post("/ct/v1/add-pre-chain", { chain: [b64(makeCert({ extensions: [POISON_EXT, POISON_EXT] }))] }), { tesseract: "cert-unparseable", sunlight: "forwarded", common: "forwarded" }],
-    [() => post("/ct/v1/add-chain", { chain: [v1Poisoned] }), { tesseract: "forwarded", sunlight: "precert-on-add-chain", common: "forwarded" }],
-    [() => post("/ct/v1/add-pre-chain", { chain: [v1Poisoned] }), { tesseract: "cert-on-add-pre-chain", sunlight: "forwarded", common: "forwarded" }],
-    [() => post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }), { tesseract: "forwarded", sunlight: "psc-not-supported", common: "forwarded" }],
-    // Rejected the same way by both origins.
-    [() => post("/ct/v1/add-chain", { chain: [PRECERT] }), { tesseract: "precert-on-add-chain", sunlight: "precert-on-add-chain", common: "precert-on-add-chain" }],
+    [() => new Request("https://log.example.com/ct/v1/add-chain", { method: "OPTIONS" }), { tesseract: "method-not-allowed", sunlight: "forwarded", trillian: "method-not-allowed", common: "forwarded" }],
+    [() => post("/ct/v1/add-chain", { chain: [b64(makeCert({ version: [3] }))] }), { tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }],
+    [() => post("/ct/v1/add-pre-chain", { chain: [b64(makeCert({ extensions: [POISON_EXT, POISON_EXT] }))] }), { tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }],
+    [() => post("/ct/v1/add-chain", { chain: [v1Poisoned] }), { tesseract: "forwarded", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "forwarded" }],
+    [() => post("/ct/v1/add-pre-chain", { chain: [v1Poisoned] }), { tesseract: "cert-on-add-pre-chain", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }],
+    [() => post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }), { tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }],
+    // Rejected the same way by all the origins.
+    [() => post("/ct/v1/add-chain", { chain: [PRECERT] }), { tesseract: "precert-on-add-chain", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "precert-on-add-chain" }],
+    // Rejected by all the origins, but for different reasons: common reports TesseraCT's.
+    [() => post("/ct/v1/add-pre-chain", { chain: [b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00]), POISON_EXT] }))] }), { tesseract: "cert-unparseable", sunlight: "poison-invalid", trillian: "poison-invalid", common: "cert-unparseable" }],
   ];
   for (const [makeRequest, want] of cases) {
     const req = makeRequest();
     assert.deepEqual(await outcomes(makeRequest), want, `${req.method} ${new URL(req.url).pathname}`);
   }
-  await assert.rejects(loadSnippet("trillian"), /CONFIG.environment must be "tesseract", "sunlight" or "common", not "trillian"/);
+  await assert.rejects(loadSnippet("ctfe"), /CONFIG.environment must be "sunlight", "tesseract", "trillian", or "common", not "ctfe"/);
 });
 
 test("any or no Content-Type is accepted, as the origin does not check it", async () => {
