@@ -21,6 +21,8 @@ const expected = (byEnvironment) => {
   assert.ok(Object.hasOwn(byEnvironment, ENVIRONMENT), `no expectation for environment ${ENVIRONMENT}`);
   return byEnvironment[ENVIRONMENT];
 };
+// The largest body that some origin in the environment accepts by default.
+const MAX_BODY = expected({ sunlight: 128 * 1024, tesseract: 512 * 1024, trillian: 512000, common: 512 * 1024 });
 
 // Requests whose body is streamed without a Content-Length (see postStream).
 const streamed = new WeakSet();
@@ -436,7 +438,7 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
   const PRE = "/ct/v1/add-pre-chain";
   const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
   const bigLength = post(ADD, { chain: [CERT] });
-  bigLength.headers.set("Content-Length", String(128 * 1024 + 1));
+  bigLength.headers.set("Content-Length", String(MAX_BODY + 1));
   const cases = {
     "method-not-allowed": new Request("https://log.example.com" + ADD),
     "body-too-large": bigLength,
@@ -649,7 +651,7 @@ test("any or no Content-Type is accepted, as the origin does not check it", asyn
 
 test("oversized Content-Length gets 413 without reading the body", async () => {
   const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
-  req.headers.set("Content-Length", String(128 * 1024 + 1));
+  req.headers.set("Content-Length", String(MAX_BODY + 1));
   const res = await snippet.fetch(req);
   assert.equal(res.status, 413);
   assert.equal(req.bodyUsed, false);
@@ -688,10 +690,27 @@ test("oversized body without a Content-Length gets 413", async () => {
 
 test("body without a Content-Length at the limit is accepted and forwarded", async () => {
   const json = JSON.stringify({ chain: [CERT, ISSUER] });
-  const body = json + " ".repeat(128 * 1024 - json.length);
+  const body = json + " ".repeat(MAX_BODY - json.length);
   const res = await snippet.fetch(postStream("/ct/v1/add-chain", body));
   assert.equal(res.status, 200);
   assert.equal(forwarded.body, body);
+});
+
+test("body without a Content-Length one byte over the limit gets 413", async () => {
+  const json = JSON.stringify({ chain: [CERT, ISSUER] });
+  const res = await snippet.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(MAX_BODY + 1 - json.length)));
+  assert.equal(res.status, 413);
+  assert.equal(forwarded, null);
+});
+
+test("CONFIG.maxBodyBytes overrides the origins' limits", async () => {
+  const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`).replace(/^(\s*maxBodyBytes: )null,/m, "$11000,");
+  assert.notEqual(source, SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`), "CONFIG.maxBodyBytes must be null");
+  const limited = (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
+  const json = JSON.stringify({ chain: [CERT] });
+  assert.equal((await limited.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(1000 - json.length)))).status, 200);
+  const res = await limited.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(1001 - json.length)));
+  assert.equal(res.headers.get("X-CTreq-Reject"), "body-too-large");
 });
 
 const postBytes = (path, bytes) =>
@@ -775,7 +794,7 @@ test("line breaks in base64 chain entries are ignored, as by the origin", async 
 
 test("Content-Length at the limit is accepted", async () => {
   const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
-  req.headers.set("Content-Length", String(128 * 1024));
+  req.headers.set("Content-Length", String(MAX_BODY));
   const res = await snippet.fetch(req);
   assert.equal(res.status, 200);
 });

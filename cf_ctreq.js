@@ -4,7 +4,7 @@
 // Copyright (C) 2026 Sectigo Limited.
 //
 // Requests to the add-chain and add-pre-chain endpoints must be POST (else 405) with
-// a body (and any Content-Length) of at most CONFIG.maxBodyBytes (else 413). The body
+// a body (and any Content-Length) no larger than the origin accepts (else 413). The body
 // is parsed as the origin (Sunlight, TesseraCT, or Trillian, all using Go's
 // encoding/json) would parse it: the "chain" key is matched case-insensitively, and
 // line breaks in base64 are ignored. The chain must be a non-empty array of at most
@@ -29,7 +29,9 @@ const CONFIG = {
   // "sunlight", "tesseract", "trillian", or "common" (only reject what all of them
   // would reject).
   environment: "common",
-  maxBodyBytes: 128 * 1024,
+  // Maximum request body size in bytes, or null for the largest of the environment's
+  // origins' defaults. Set it if the origin is configured with a different limit.
+  maxBodyBytes: null,
   maxChainLength: 10,
   minCertBytes: 128,
   // Prefix of the problem details "type" URI; the rejection reason code is appended.
@@ -41,11 +43,13 @@ const CONFIG = {
 //   certificate-transparency-go's x509 ("ctgo");
 // - allowsOptions: it answers CORS preflight (OPTIONS) requests itself;
 // - rejectsPrecertSigningCerts: it doesn't support Precertificate Signing Certificates;
-// - allowsAnyOrigin: its responses have "Access-Control-Allow-Origin: *".
+// - allowsAnyOrigin: its responses have "Access-Control-Allow-Origin: *";
+// - maxBodyBytes: its (default) maximum request body size: fixed in Sunlight, and set
+//   by --max_cert_chain_bytes in TesseraCT and --max_cert_chain_size in Trillian.
 const ORIGINS = {
-  sunlight: { x509: "ctgo", allowsOptions: true, rejectsPrecertSigningCerts: true, allowsAnyOrigin: true },
-  tesseract: { x509: "go", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false },
-  trillian: { x509: "ctgo", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false },
+  sunlight: { x509: "ctgo", allowsOptions: true, rejectsPrecertSigningCerts: true, allowsAnyOrigin: true, maxBodyBytes: 128 * 1024 },
+  tesseract: { x509: "go", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false, maxBodyBytes: 512 * 1024 },
+  trillian: { x509: "ctgo", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false, maxBodyBytes: 512000 },
 };
 // The origins that must all reject a request for it to be rejected, for each
 // environment.
@@ -658,11 +662,13 @@ export default {
       return fetch(request);
     }
 
+    // A body is only too large if it's too large for every origin in the environment.
+    const maxBodyBytes = CONFIG.maxBodyBytes ?? Math.max(...origins.map((o) => o.maxBodyBytes));
     const contentLength = request.headers.get("Content-Length");
-    if (contentLength !== null && Number(contentLength) > CONFIG.maxBodyBytes) {
+    if (contentLength !== null && Number(contentLength) > maxBodyBytes) {
       return errorResponse(rejection("body-too-large", "request body too large", 413), origins);
     }
-    const body = await readBody(request, CONFIG.maxBodyBytes);
+    const body = await readBody(request, maxBodyBytes);
     if (body === null) {
       return errorResponse(rejection("body-too-large", "request body too large", 413), origins);
     }

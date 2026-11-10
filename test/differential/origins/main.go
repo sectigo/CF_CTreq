@@ -6,8 +6,9 @@
 // where a verdict is "accept" or "reject". The models apply each origin's real JSON
 // and X.509 parsers, and its checks of the chain's names and precertificate status,
 // but don't verify signatures or apply a log's acceptance policy, as the snippet
-// doesn't either. A model's "accept" therefore means that the origin would accept the
-// request if its signatures were valid and its policy allowed it.
+// doesn't either, and they reject a body larger than the origin's default limit. A
+// model's "accept" therefore means that the origin would accept the request if its
+// signatures were valid and its policy allowed it.
 package main
 
 import (
@@ -91,10 +92,20 @@ func ctgo(chain [][]byte, preChain, rejectPreIssuers bool) bool {
 	return isPrecert == preChain
 }
 
-var models = map[string]func(chain [][]byte, preChain bool) bool{
-	"tesseract": tesseract,
-	"sunlight":  func(chain [][]byte, preChain bool) bool { return ctgo(chain, preChain, true) },
-	"trillian":  func(chain [][]byte, preChain bool) bool { return ctgo(chain, preChain, false) },
+type model struct {
+	accepts func(chain [][]byte, preChain bool) bool
+	// The default maximum request body size, beyond which the origin's
+	// http.MaxBytesHandler makes it reject the request.
+	maxBodyBytes int
+}
+
+var models = map[string]model{
+	// --max_cert_chain_bytes (cmd/tesseract/*/main.go)
+	"tesseract": {tesseract, 512 << 10},
+	// Fixed (internal/ctlog/http.go)
+	"sunlight": {func(chain [][]byte, preChain bool) bool { return ctgo(chain, preChain, true) }, 128 * 1024},
+	// --max_cert_chain_size (trillian/ctfe/ct_server/main.go)
+	"trillian": {func(chain [][]byte, preChain bool) bool { return ctgo(chain, preChain, false) }, 512000},
 }
 
 func main() {
@@ -123,8 +134,8 @@ func main() {
 				log.Fatalf("unknown model %q", name)
 			}
 			addChain, addPreChain := false, false
-			if parsed {
-				addChain, addPreChain = model(req.Chain, false), model(req.Chain, true)
+			if parsed && len(item.Body) <= model.maxBodyBytes {
+				addChain, addPreChain = model.accepts(req.Chain, false), model.accepts(req.Chain, true)
 			}
 			fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", item.ID, name, verdict(addChain), verdict(addPreChain))
 		}

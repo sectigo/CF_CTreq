@@ -5,8 +5,7 @@
 //
 // With --replay, the corpus is instead recent real entries from the logs in Google's
 // log list (see replay.mjs), each sent to the endpoint it was submitted to; this needs
-// network access. Entries whose requests would exceed the snippet's body size limit
-// are skipped.
+// network access.
 //
 // Environment variables:
 //   CTREQ_DIFF_COUNT   number of requests to generate (default 10000)
@@ -75,11 +74,10 @@ function runModels(version, models, corpusFile, verdicts) {
 
 let corpus;
 if (replaying) {
-  const maxBodyBytes = SOURCE.match(/maxBodyBytes: ([\d *]+),/)[1].split("*").reduce((a, b) => a * Number(b), 1);
   const { items, logs, failed } = await replay({ log: () => {} });
   for (const { name, error } of failed) warn(`couldn't read ${name}: ${error}`);
-  corpus = items.filter(({ body }) => Buffer.byteLength(body) <= maxBodyBytes);
-  console.log(`Replaying ${corpus.length} real entries from ${logs - failed.length} of ${logs} logs (skipped ${items.length - corpus.length} larger than ${maxBodyBytes} bytes).`);
+  corpus = items;
+  console.log(`Replaying ${corpus.length} real entries from ${logs - failed.length} of ${logs} logs.`);
   if (!corpus.length) throw new Error("no entries to replay");
 } else {
   corpus = generate({ seed, count });
