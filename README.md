@@ -92,7 +92,7 @@ As far as possible, the snippet aims to only reject requests that the origin wou
 - **Extensions in v1 and v2 certificates**: X.509 only defines extensions for v3, and Go's `crypto/x509` ignores any in a v1 or v2 certificate, so the snippet does too.  A v1 certificate containing a CT Poison extension is therefore treated as a certificate, not a precertificate.
 - **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm, validity, public key and signature are not checked, and nor is anything after the extensions or after an extension's value (which Go also ignores).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
 
-The snippet is stricter than the origin's defaults in one respect: TesseraCT accepts a body of up to 512 KiB and any number of chain entries, whereas the snippet's `CONFIG` limits are 128 KiB (`body-too-large`) and 10 entries (`chain-too-long`), which are enough for real certificate chains.
+The snippet's `CONFIG` limits are stricter than the origin's defaults: TesseraCT accepts a body of up to 512 KiB and any number of chain entries, whereas the snippet's limits are 128 KiB (`body-too-large`) and 10 entries (`chain-too-long`), which are enough for real certificate chains.  TesseraCT also has no minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that TesseraCT would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
 
 ## Deployment
 
