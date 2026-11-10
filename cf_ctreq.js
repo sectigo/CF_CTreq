@@ -5,11 +5,11 @@
 //
 // Requests to the add-chain and add-pre-chain endpoints must be POST (else 405) with
 // a body (and any Content-Length) of at most CONFIG.maxBodyBytes (else 413). The body
-// is parsed as the origin (TesseraCT or Sunlight, both using Go's encoding/json) would
-// parse it: the "chain" key is matched case-insensitively, and line breaks in base64
-// are ignored. The chain must be a non-empty array of at most CONFIG.maxChainLength
-// base64 strings, each decoding to at least CONFIG.minCertBytes and to a DER SEQUENCE
-// whose declared length matches its actual length (else 400).
+// is parsed as the origin (Sunlight, TesseraCT, or Trillian, all using Go's
+// encoding/json) would parse it: the "chain" key is matched case-insensitively, and
+// line breaks in base64 are ignored. The chain must be a non-empty array of at most
+// CONFIG.maxChainLength base64 strings, each decoding to at least CONFIG.minCertBytes
+// and to a DER SEQUENCE whose declared length matches its actual length (else 400).
 //
 // Every certificate must then parse as X.509 down to its extensions (RFC 5280), as
 // the origin's X.509 parser would parse it, else 400, and:
@@ -20,12 +20,14 @@
 //   Certificate.
 // - Each certificate's issuer name must be byte-identical to the subject name of
 //   the next certificate in the chain. Signatures are not verified.
-// CONFIG.environment selects whose criteria apply: "tesseract" or "sunlight" rejects
-// what that origin would reject, and "common" only rejects what both would reject.
+// CONFIG.environment selects whose criteria apply: "sunlight", "tesseract", or
+// "trillian" rejects what that origin would reject, and "common" only rejects what
+// all of them would reject.
 // Requests that pass these checks are forwarded to the origin unchanged.
 
 const CONFIG = {
-  // "tesseract", "sunlight", or "common" (only reject what both would reject).
+  // "sunlight", "tesseract", "trillian", or "common" (only reject what all of them
+  // would reject).
   environment: "common",
   maxBodyBytes: 128 * 1024,
   maxChainLength: 10,
@@ -34,21 +36,34 @@ const CONFIG = {
   problemTypeBase: "https://github.com/sectigo/CF_CTreq#",
 };
 
-// The origins whose rejection criteria must all be met for each environment.
-const ENVIRONMENT_ORIGINS = {
-  tesseract: ["tesseract"],
-  sunlight: ["sunlight"],
-  common: ["tesseract", "sunlight"],
+// How each origin differs, as far as it affects which requests it rejects:
+// - x509: its X.509 parser, either Go's crypto/x509 ("go") or
+//   certificate-transparency-go's x509 ("ctgo");
+// - allowsOptions: it answers CORS preflight (OPTIONS) requests itself;
+// - rejectsPrecertSigningCerts: it doesn't support Precertificate Signing Certificates;
+// - allowsAnyOrigin: its responses have "Access-Control-Allow-Origin: *".
+const ORIGINS = {
+  sunlight: { x509: "ctgo", allowsOptions: true, rejectsPrecertSigningCerts: true, allowsAnyOrigin: true },
+  tesseract: { x509: "go", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false },
+  trillian: { x509: "ctgo", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false },
+};
+// The origins that must all reject a request for it to be rejected, for each
+// environment.
+const ENVIRONMENTS = {
+  sunlight: [ORIGINS.sunlight],
+  tesseract: [ORIGINS.tesseract],
+  trillian: [ORIGINS.trillian],
+  common: Object.values(ORIGINS),
 };
 // Fail at deployment, rather than on every request, if CONFIG.environment is wrong.
 originsFor(CONFIG.environment);
 
 function originsFor(environment) {
-  const origins = Object.hasOwn(ENVIRONMENT_ORIGINS, environment) ? ENVIRONMENT_ORIGINS[environment] : undefined;
-  if (origins === undefined) {
-    throw new Error(`CONFIG.environment must be "tesseract", "sunlight" or "common", not ${JSON.stringify(environment)}`);
+  if (!Object.hasOwn(ENVIRONMENTS, environment)) {
+    const names = Object.keys(ENVIRONMENTS).map((e) => JSON.stringify(e));
+    throw new Error(`CONFIG.environment must be ${names.slice(0, -1).join(", ")}, or ${names.at(-1)}, not ${JSON.stringify(environment)}`);
   }
-  return origins;
+  return ENVIRONMENTS[environment];
 }
 
 // OID contents (without tag and length) as binary strings.
@@ -113,10 +128,10 @@ function derChildren(data, parent) {
 
 // Parses the extensions inside a certificate's [3] wrapper into { oid, critical, value }
 // entries (value is the DER location of the extnValue contents), or returns null if
-// they are malformed, as the origin's X.509 parser would. Only TesseraCT (Go's
-// crypto/x509) rejects two extensions of the same type.
+// they are malformed, as the origin's X.509 parser would. Only Go's crypto/x509
+// rejects two extensions of the same type.
 function certExtensions(cert, wrapper, origin) {
-  // As for both origins, anything after the SEQUENCE inside [3] is ignored.
+  // As for both X.509 parsers, anything after the SEQUENCE inside [3] is ignored.
   const list = derDecode(cert, wrapper.offset, wrapper.end);
   const entries = list !== null && list.tag === 0x30 ? derChildren(cert, list) : null;
   if (entries === null) {
@@ -125,7 +140,7 @@ function certExtensions(cert, wrapper, origin) {
   const extensions = [];
   for (const entry of entries) {
     // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }
-    // As for both origins, anything after extnValue is ignored.
+    // As for both X.509 parsers, anything after extnValue is ignored.
     const oid = entry.tag === 0x30 ? derDecode(cert, entry.offset, entry.end) : null;
     if (oid === null || oid.tag !== 0x06) {
       return null;
@@ -133,7 +148,7 @@ function certExtensions(cert, wrapper, origin) {
     let critical = false;
     let i = oid.end;
     if (i < entry.end && cert.charCodeAt(i) === 0x01) {
-      // Both origins only accept 0x00 (FALSE) and 0xFF (TRUE).
+      // Both X.509 parsers only accept 0x00 (FALSE) and 0xFF (TRUE).
       const flag = derDecode(cert, i, entry.end);
       const byte = flag?.length === 1 ? cert.charCodeAt(flag.offset) : -1;
       if (byte !== 0x00 && byte !== 0xff) {
@@ -144,7 +159,7 @@ function certExtensions(cert, wrapper, origin) {
     }
     const value = derDecode(cert, i, entry.end);
     const id = cert.slice(oid.offset, oid.end);
-    if (value === null || value.tag !== 0x04 || (origin === "tesseract" && extensions.some((e) => e.oid === id))) {
+    if (value === null || value.tag !== 0x04 || (origin.x509 === "go" && extensions.some((e) => e.oid === id))) {
       return null;
     }
     extensions.push({ oid: id, critical, value });
@@ -155,11 +170,11 @@ function certExtensions(cert, wrapper, origin) {
 // Parses a certificate into { der, issuer, subject, extensions } (the names being DER
 // encodings including headers), or returns null if the origin's X.509 parser would
 // reject it. The TBSCertificate is read field by field, as far as the extensions, as
-// both origins read it: the optional unique IDs and extensions are only found directly
-// after the public key, and anything after them is ignored. TesseraCT (Go's
-// crypto/x509) only accepts v1, v2 and v3, and only reads the unique IDs from v2 and
-// v3 certificates and the extensions from v3 certificates; Sunlight
-// (certificate-transparency-go's x509) accepts any version and reads them regardless.
+// both X.509 parsers read it: the optional unique IDs and extensions are only found
+// directly after the public key, and anything after them is ignored. Go's crypto/x509
+// (TesseraCT) only accepts v1, v2 and v3, and only reads the unique IDs from v2 and
+// v3 certificates and the extensions from v3 certificates; certificate-transparency-go's
+// x509 (Sunlight, Trillian) accepts any version and reads them regardless.
 function parseCert(der, origin) {
   const root = derDecode(der, 0);
   const tbs = root && derDecode(der, root.offset, root.end);
@@ -185,7 +200,7 @@ function parseCert(der, origin) {
     if (wrapper === null) {
       return null;
     }
-    if (origin === "tesseract") {
+    if (origin.x509 === "go") {
       const integer = derDecode(der, wrapper.offset, wrapper.end);
       if (integer === null || integer.tag !== 0x02 || integer.length !== 1 || integer.end !== wrapper.end) {
         return null;
@@ -203,12 +218,12 @@ function parseCert(der, origin) {
   }
   const [, , issuer, , subject] = fields;
   let extensions = [];
-  if (origin === "sunlight" || version >= 1) {
+  if (origin.x509 === "ctgo" || version >= 1) {
     // issuerUniqueID [1] and subjectUniqueID [2], both IMPLICIT and optional.
     if ((peek(0x81) && read(0x81) === null) || (peek(0x82) && read(0x82) === null)) {
       return null;
     }
-    if ((origin === "sunlight" || version === 2) && peek(0xa3)) {
+    if ((origin.x509 === "ctgo" || version === 2) && peek(0xa3)) {
       const wrapper = read(0xa3);
       extensions = wrapper && certExtensions(der, wrapper, origin);
       if (extensions === null) {
@@ -256,7 +271,7 @@ function chainRejection(origin, ders, isPreChainAPI) {
   }
 
   const { der: firstDer, extensions } = certs[0];
-  // Both origins check the first poison extension, if there's more than one.
+  // All the origins check the first poison extension, if there's more than one.
   const poison = extensions.find((e) => e.oid === OID_CT_POISON);
   if (poison !== undefined) {
     if (!poison.critical || firstDer.slice(poison.value.offset, poison.value.end) !== NULL_VALUE) {
@@ -272,7 +287,7 @@ function chainRejection(origin, ders, isPreChainAPI) {
   }
   // Sunlight doesn't support Precertificate Signing Certificates, as
   // c2sp.org/static-ct-api@v1.1.0 allows.
-  if (origin === "sunlight" && hasPoison && certs.length > 1 && isPrecertSigningCert(certs[1])) {
+  if (origin.rejectsPrecertSigningCerts && hasPoison && certs.length > 1 && isPrecertSigningCert(certs[1])) {
     return rejection("psc-not-supported", "precertificate signing certificates are not supported");
   }
   for (let i = 0; i + 1 < certs.length; i++) {
@@ -329,21 +344,21 @@ async function readBody(request, maxBytes) {
 // Rejections are RFC 9457 problem details (application/problem+json, itself JSON as
 // RFC 6962 section 4 requires of all responses). The X-CTreq-Reject response header
 // carries the same reason code so that rejections can be analysed in Cloudflare logs.
-// As Sunlight does, so that browsers can read them, rejections allow any origin unless
-// the environment is TesseraCT.
-function errorResponse({ reason, message, status, headers }) {
+// If any of the environment's origins allows any origin in its responses (as Sunlight
+// does, so that browsers can read them), rejections do too.
+function errorResponse({ reason, message, status, headers }, origins) {
   const problem = { type: CONFIG.problemTypeBase + reason, title: message, status };
-  const cors = CONFIG.environment === "tesseract" ? {} : { "Access-Control-Allow-Origin": "*" };
+  const cors = origins.some((o) => o.allowsAnyOrigin) ? { "Access-Control-Allow-Origin": "*" } : {};
   return new Response(JSON.stringify(problem) + "\n", {
     status,
     headers: { "Content-Type": "application/problem+json", "X-CTreq-Reject": reason, ...cors, ...headers },
   });
 }
 
-// Returns the rejection, if any, for a request whose body hasn't been read yet.
-// Sunlight answers CORS preflight (OPTIONS) requests itself.
+// Returns the rejection, if any, for a request whose body hasn't been read yet. A
+// method is only rejected if none of the environment's origins accepts it.
 function methodRejection(origins, method) {
-  const allowed = origins.includes("sunlight") ? ["OPTIONS", "POST"] : ["POST"];
+  const allowed = origins.some((o) => o.allowsOptions) ? ["OPTIONS", "POST"] : ["POST"];
   if (allowed.includes(method)) {
     return null;
   }
@@ -403,7 +418,7 @@ export default {
 
     const methodRejected = methodRejection(origins, request.method);
     if (methodRejected !== null) {
-      return errorResponse(methodRejected);
+      return errorResponse(methodRejected, origins);
     }
     if (request.method !== "POST") {
       return fetch(request);
@@ -411,22 +426,22 @@ export default {
 
     const contentLength = request.headers.get("Content-Length");
     if (contentLength !== null && Number(contentLength) > CONFIG.maxBodyBytes) {
-      return errorResponse(rejection("body-too-large", "request body too large", 413));
+      return errorResponse(rejection("body-too-large", "request body too large", 413), origins);
     }
     const body = await readBody(request, CONFIG.maxBodyBytes);
     if (body === null) {
-      return errorResponse(rejection("body-too-large", "request body too large", 413));
+      return errorResponse(rejection("body-too-large", "request body too large", 413), origins);
     }
 
     const ders = bodyRejectionOrChain(body);
     if (!Array.isArray(ders)) {
-      return errorResponse(ders);
+      return errorResponse(ders, origins);
     }
-    // Only reject if every origin in the environment would reject (reporting the
-    // first origin's reason).
+    // Only reject if every origin in the environment would reject, reporting
+    // TesseraCT's reason if it is one of them (else the first origin's).
     const rejections = origins.map((origin) => chainRejection(origin, ders, isPreChainAPI));
     if (rejections.every((r) => r !== null)) {
-      return errorResponse(rejections[0]);
+      return errorResponse(rejections[Math.max(0, origins.indexOf(ORIGINS.tesseract))], origins);
     }
 
     // The original body stream has been consumed, so forward a copy of its exact bytes.
