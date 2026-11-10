@@ -3,16 +3,13 @@
 // Written by Rob Stradling.
 // Copyright (C) 2026 Sectigo Limited.
 //
-// Cloudflare Snippet that preprocesses Certificate Transparency (RFC 6962)
-// add-chain and add-pre-chain POST requests.
-//
-// Requests to these endpoints must be POST (else 405) with a body (and any
-// Content-Length) of at most CONFIG.maxBodyBytes (else 413). The body is parsed as
-// the origin (TesseraCT, using Go's encoding/json) would parse it: the "chain" key is
-// matched case-insensitively, and line breaks in base64 are ignored. The chain must be
-// a non-empty array of at most CONFIG.maxChainLength base64 strings, each decoding to
-// at least CONFIG.minCertBytes and to a DER SEQUENCE whose declared length matches its
-// actual length (else 400).
+// Requests to the add-chain and add-pre-chain endpoints must be POST (else 405) with
+// a body (and any Content-Length) of at most CONFIG.maxBodyBytes (else 413). The body
+// is parsed as the origin (TesseraCT, using Go's encoding/json) would parse it: the
+// "chain" key is matched case-insensitively, and line breaks in base64 are ignored.
+// The chain must be a non-empty array of at most CONFIG.maxChainLength base64
+// strings, each decoding to at least CONFIG.minCertBytes and to a DER SEQUENCE whose
+// declared length matches its actual length (else 400).
 //
 // Every certificate must then parse as X.509 down to its extensions (RFC 5280),
 // else 400, and:
