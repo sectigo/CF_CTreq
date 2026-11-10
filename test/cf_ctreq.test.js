@@ -18,7 +18,9 @@ const ext = (oid, critical, value) =>
 const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
 
 // version is the content of the [0] version INTEGER (default v3), or null to omit it (v1).
-function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2] } = {}) {
+// beforeExtensions and afterExtensions are raw bytes placed around the [3] extensions
+// field, which extensionsField replaces.
+function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], beforeExtensions = [], extensionsField, afterExtensions = [] } = {}) {
   const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
   const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
   const time = tlv(0x17, Buffer.from("260101000000Z"));
@@ -30,7 +32,9 @@ function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2]
     seq(time, time),
     name(subject),
     seq(alg, tlv(0x03, [0, ...Array(32).fill(1)])),
-    extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0),
+    Buffer.from(beforeExtensions),
+    extensionsField ?? (extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0)),
+    Buffer.from(afterExtensions),
   );
   return seq(tbs, alg, tlv(0x03, [0, ...Array(64).fill(2)]));
 }
@@ -292,6 +296,52 @@ test("unknown or malformed certificate versions are rejected", async () => {
   for (const version of [[3], [0xff], [0x00, 0x02]]) {
     const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ version })), ISSUER] }));
     assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable", JSON.stringify(version));
+  }
+  assert.equal(forwarded, null);
+});
+
+const NULL = [0x05, 0x00];
+
+test("structures that Go's crypto/x509 tolerates around the extensions are accepted", async () => {
+  const precerts = {
+    "element after extnValue": makeCert({ extensions: [seq(tlv(0x06, ctOid(3)), tlv(0x01, [0xff]), tlv(0x04, NULL), Buffer.from(NULL))] }),
+    "data after the SEQUENCE inside [3]": makeCert({ extensionsField: tlv(0xa3, Buffer.concat([seq(POISON_EXT), Buffer.from(NULL)])) }),
+    "malformed data after [3]": makeCert({ extensions: [POISON_EXT], afterExtensions: [0xff, 0xff, 0xff] }),
+    "unique IDs before [3]": makeCert({ extensions: [POISON_EXT], beforeExtensions: [...tlv(0x81, [0, 1]), ...tlv(0x82, [0, 2])] }),
+  };
+  for (const [name, cert] of Object.entries(precerts)) {
+    const body = JSON.stringify({ chain: [b64(cert), ISSUER] });
+    forwarded = null;
+    const res = await snippet.fetch(post("/ct/v1/add-pre-chain", body));
+    assert.equal(res.status, 200, name);
+    assert.equal(forwarded.body, body, name);
+    assert.equal((await snippet.fetch(post("/ct/v1/add-chain", body))).headers.get("X-CTreq-Reject"), "precert-on-add-chain", name);
+  }
+});
+
+test("extensions are only read where Go's crypto/x509 looks for them", async () => {
+  // Go only looks for [3] directly after the public key and the optional unique IDs.
+  const cert = b64(makeCert({ extensions: [POISON_EXT], beforeExtensions: NULL }));
+  const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [cert, ISSUER] }));
+  assert.equal(res.status, 200);
+  forwarded = null;
+  const pre = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [cert, ISSUER] }));
+  assert.equal(pre.headers.get("X-CTreq-Reject"), "cert-on-add-pre-chain");
+});
+
+test("malformed fields that Go's crypto/x509 reads are rejected", async () => {
+  const certs = {
+    "duplicate extension": makeCert({ extensions: [POISON_EXT, POISON_EXT] }),
+    "extension list element that isn't a SEQUENCE": makeCert({ extensionsField: tlv(0xa3, seq(POISON_EXT, Buffer.from(NULL))) }),
+    "malformed [3]": makeCert({ extensionsField: Buffer.from([0xa3, 0x7f]) }),
+    "malformed issuerUniqueID": makeCert({ beforeExtensions: [0x81, 0x7f] }),
+    "missing subjectPublicKeyInfo": seq(seq(tlv(0xa0, tlv(0x02, [2])), tlv(0x02, [1]), seq(), seq(), seq(), seq(Buffer.alloc(120))), seq()),
+  };
+  for (const [name, cert] of Object.entries(certs)) {
+    for (const path of ["/ct/v1/add-chain", "/ct/v1/add-pre-chain"]) {
+      const res = await snippet.fetch(post(path, { chain: [b64(cert), ISSUER] }));
+      assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable", `${name} on ${path}`);
+    }
   }
   assert.equal(forwarded, null);
 });
