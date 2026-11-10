@@ -1,0 +1,44 @@
+{
+  "repositories": [
+    {
+      "repository": "transparency-dev/tesseract",
+      "branch": "main",
+      "reviewed": "68d4c09d5e922920d3e4d68805d761cf45d95a0f",
+      "files": {
+        "internal/ct/handlers.go": "d71c082bf34f694e2ff69aa58a95e125f3984782",
+        "internal/ct/chain_validation.go": "f8ba27c6256bb0d45024bb2b43594b8c06413517",
+        "internal/x509util/ct.go": "7c5c68d5a5eb886e49f1988629c853ab4a0af321",
+        "internal/lax509/verify.go": "aecb3e13df4b1aa7584d70e1e41777b09977834e",
+        "internal/lax509/cert_pool.go": "304e50ab334353dd7b475c611d19fc1c00aeac7b",
+        "internal/types/rfc6962/rfc6962.go": "dfa58f701d578bf8587b2cfd1d8e316a1794e986",
+        "ctlog.go": "714abc47f6962631bd887091cd9166e8211469fb",
+        "go.mod": "47a7ef98f1b904fed46d73e16670901e37e706af"
+      }
+    },
+    {
+      "repository": "FiloSottile/sunlight",
+      "branch": "main",
+      "reviewed": "3d3e6478a9094573cd84b88c3dd2e7dc39a811b8",
+      "files": {
+        "internal/ctlog/http.go": "8fdee358542429bd456e68fc89570221a3abe9d0",
+        "go.mod": "88cd6f04d1c135707ff96ec758c8fc44b8067c58"
+      }
+    },
+    {
+      "repository": "google/certificate-transparency-go",
+      "branch": "master",
+      "reviewed": "87942207da279233ca560b19aa3c91420a1366ba",
+      "files": {
+        "trillian/ctfe/handlers.go": "cc5120a9373e6ab92c11e7388fb629e0aae34181",
+        "trillian/ctfe/cert_checker.go": "41566bf70fa62b25befe8f0231b5fa12e9ee869d",
+        "trillian/ctfe/ct_server/main.go": "dce189394836d8eb7146909a0bc7928708efbc14",
+        "x509/x509.go": "1a1e859bbb33c7b115b3969c82e42dba2075cf9a",
+        "x509/cert_pool.go": "4823d594633a0b31914f420ffea1d4ff19ed6af8",
+        "x509/verify.go": "07118c2bf6543f9dbf16caeefb7dddfc52671cff",
+        "asn1/asn1.go": "336813ac1024b2941bfb98f369ca74ec2c295542",
+        "serialization.go": "2a6c21ed4cfdfab5380838967d2b5a4538efb3eb",
+        "types.go": "10092af44d3d1fd0812350201c2f1d655b31140b"
+      }
+    }
+  ]
+}

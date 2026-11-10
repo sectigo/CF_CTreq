@@ -265,6 +265,14 @@ npm run test:differential
 
 `CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions.  They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request.
 
+The origins change over time, so an [origin drift](.github/workflows/drift.yml) workflow also runs weekly (and for pull requests that change the differential tests).  It runs the differential tests against the latest versions of the origins' parsers (the latest Go, and the `certificate-transparency-go` versions on Sunlight's `main` and Trillian's `master` branches), and it checks whether any of the upstream source files that determine the origins' rejection criteria (listed in [`upstream.json`](test/differential/upstream.json)) have changed since they were last reviewed:
+
+```
+node test/differential/upstream.mjs
+```
+
+If either fails, the workflow opens an issue.  After reviewing upstream changes (and updating the snippet, the origin models or `versions.json` if necessary), record them with `node test/differential/upstream.mjs --update`.
+
 ### Testing a deployed log
 
 To check a deployed snippet end to end, set `CTREQ_LOG_URL` to the log's base URL (including any path prefix such as a shard name), and `CTREQ_ENVIRONMENT` to the deployed snippet's environment if it differs from that of the local `cf_ctreq.js`:

@@ -1,0 +1,77 @@
+name: Origin drift
+
+# Checks weekly whether the origins have changed in ways that might affect the
+# snippet: whether the upstream files that determine their rejection criteria have
+# changed since they were reviewed, and whether the differential tests still pass
+# against the latest versions of their parsers. A scheduled failure opens an issue.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/drift.yml
+      - test/differential/**
+
+permissions:
+  contents: read
+
+jobs:
+  upstream:
+    name: Watched upstream files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - run: node test/differential/upstream.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  differential:
+    name: Differential tests against the latest origin parsers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: test/differential/origins/go.sum
+      - name: Use the certificate-transparency-go versions of Sunlight's main branch and Trillian's master branch
+        run: |
+          sunlight=$(curl -fsSL https://raw.githubusercontent.com/FiloSottile/sunlight/main/go.mod | awk '$1 == "github.com/google/certificate-transparency-go" { print $2 }')
+          test -n "$sunlight"
+          echo "CTREQ_DIFF_SUNLIGHT=$sunlight" >> "$GITHUB_ENV"
+          echo "CTREQ_DIFF_TRILLIAN=master" >> "$GITHUB_ENV"
+      - run: npm run test:differential
+        env:
+          CTREQ_DIFF_COUNT: 30000
+          CTREQ_DIFF_SEED: ${{ github.run_number }}
+
+  report:
+    name: Open or update an issue
+    needs: [upstream, differential]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Origin drift check failed"
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "It failed again: $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "The weekly origin drift check failed: $RUN_URL
+
+          If the *Watched upstream files* job failed, review the listed upstream changes, update the snippet, the origin models (\`test/differential/origins\`) or \`test/differential/versions.json\` if necessary, then record the reviewed versions with \`node test/differential/upstream.mjs --update\`.
+
+          If the *Differential tests* job failed, the snippet would reject requests that the latest version of an origin's parser accepts: see the job's output for examples."
+          fi
