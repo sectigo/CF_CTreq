@@ -6,7 +6,20 @@ CF_CTreq is a preprocessor for Certificate Transparency (CT) log API requests (R
 
 ## Why is it needed?
 
-A large volume of malformed log API requests might overwhelm the origin's error logging.  It's better to deal with malformed requests at the CDN edge wherever possible.
+A CT log's `add-chain` and `add-pre-chain` endpoints have to be open to anyone on the Internet: any CA, monitor or researcher must be able to submit a certificate, without authentication.  That openness means a log also receives a steady stream of requests that it can never accept: truncated or mangled JSON, chains that aren't valid base64 or DER, precertificates sent to the wrong endpoint, chains in the wrong order, and so on, from buggy clients, misconfigured CAs, scanners and deliberate abuse.  A single faulty client in a retry loop can send them by the million.
+
+Every one of those requests costs the origin something, even though it will be rejected:
+
+- **Capacity**: the origin reads the body, decodes the JSON and parses the certificates before it can reject the request, using the same CPU, memory, bandwidth and connections that valid submissions need.
+- **Error logging**: rejected submissions are logged, sometimes with the whole request.  A large volume of malformed requests can bury real problems, inflate storage and alerting costs, or overwhelm the logging pipeline altogether.
+- **Collateral damage**: if the origin has to shed load or apply rate limits, legitimate CAs can be slowed down or turned away along with the junk.
+
+CF_CTreq stops these requests at the CDN edge instead, before they reach the origin:
+
+- **It never turns away a valid submission.**  Each check mirrors the origin's own parsing and rejection criteria, so it only rejects requests that the origin would reject anyway (see [How does it work?](#how-does-it-work)), and it forwards everything else byte for byte.
+- **It is cheap and fast.**  It runs as a Cloudflare Snippet, typically in about 0.05 ms per request, and well within a Snippet's 5 ms limit even for the largest requests (see [Limits](#limits)).
+- **It helps submitters fix their mistakes.**  Each rejection says precisely what is wrong, as a JSON problem details object, with a reason code that links to its explanation below.
+- **It makes the problem visible.**  The reason code is also in an `X-CTreq-Reject` header, so rejections can be counted and charted by cause (see [Monitoring rejections](#monitoring-rejections)), showing which clients are misbehaving and how.
 
 ## How does it work?
 
