@@ -212,6 +212,8 @@ Requires Node.js 18 or later (no dependencies):
 npm test
 ```
 
+The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 18, the current LTS version and the latest version.  Besides checking behaviour, they check that [`cf_ctreq.js`](cf_ctreq.js) stays within a Snippet's [size and time limits](#limits).
+
 To also print every certificate chain the tests submit (decoded with `openssl x509`, which must be installed) and how the snippet responds to it, use npm's verbose flag:
 
 ```

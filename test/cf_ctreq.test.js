@@ -373,6 +373,12 @@ test("duplicate extensions are only rejected by TesseraCT", async () => {
   assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
 });
 
+test("cf_ctreq.js fits within a Snippet's 32 KB size limit", () => {
+  // Cloudflare limits a Snippet's total package size to 32 KB; 32,000 bytes leaves no doubt.
+  const size = Buffer.byteLength(SOURCE);
+  assert.ok(size <= 32000, `cf_ctreq.js is ${size} bytes`);
+});
+
 test("thousands of extensions are checked well within a Snippet's 5 ms limit", async () => {
   // Distinct OIDs 1.2.<k>, so that the duplicate check has to compare them all.
   const arc = (k) => (k < 128 ? [k] : [0x80 | (k >> 7), k & 0x7f]);
