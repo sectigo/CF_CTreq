@@ -373,6 +373,21 @@ test("duplicate extensions are only rejected by TesseraCT", async () => {
   assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
 });
 
+test("thousands of extensions are checked well within a Snippet's 5 ms limit", async () => {
+  // Distinct OIDs 1.2.<k>, so that the duplicate check has to compare them all.
+  const arc = (k) => (k < 128 ? [k] : [0x80 | (k >> 7), k & 0x7f]);
+  const many = b64(makeCert({ extensions: Array.from({ length: 7000 }, (_, k) => ext([0x2a, ...arc(k)], false, [])) }));
+  const request = () => snippet.fetch(post("/ct/v1/add-chain", { chain: [many] }));
+  await request();
+  const start = performance.now();
+  const res = await request();
+  const elapsed = performance.now() - start;
+  assert.equal(outcome(res), "forwarded");
+  // About 1 ms when the duplicate check uses a Set, but ~100 ms when it compared every
+  // pair of extensions; generous, so as not to fail on a slow machine.
+  assert.ok(elapsed < 40, `took ${elapsed.toFixed(1)} ms`);
+});
+
 test("extension OIDs are decoded as the origin's X.509 parser decodes them", async () => {
   // The poison OID with its 11129 arc (0xd6 0x79) padded with a leading 0x80 byte,
   // which only certificate-transparency-go's x509 (Sunlight, Trillian) accepts.

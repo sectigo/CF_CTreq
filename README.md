@@ -133,6 +133,10 @@ The snippet forwards every request that isn't for an `add-chain` or `add-pre-cha
 
 Keep **Normalize incoming URLs** turned on (under **Rules** > **Settings** > **URL Normalization**; it is on by default).  The origin also routes percent-encoded forms of these paths, such as `/ct/v1/add%2Dchain`, to the same endpoints, and [URL normalization](https://developers.cloudflare.com/rules/normalization/how-it-works/) decodes them before the rule above is evaluated.  If it were turned off, the rule wouldn't match them, so they would reach the origin without being checked.
 
+### Limits
+
+Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code; [`cf_ctreq.js`](cf_ctreq.js) is about 27 KB.  Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and the slowest requests allowed by the 128 KiB body limit (such as one certificate with about 10,000 extensions, or a body with thousands of JSON keys) take about 2 ms in the `common` environment, which parses each certificate with both X.509 parsers.
+
 ## Monitoring rejections
 
 Every rejection carries an [`X-CTreq-Reject`](#rejection-responses) response header, so counting rejections by reason is a matter of getting that header into your logs.  This section is based on the Cloudflare, Elastic and Grafana documentation and has not been tested end to end.
