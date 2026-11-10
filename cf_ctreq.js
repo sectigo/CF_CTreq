@@ -388,7 +388,13 @@ function parseCert(der, origin) {
   if (fields.includes(null)) {
     return null;
   }
-  const [, , issuer, , subject] = fields;
+  const [, signature, issuer, , subject] = fields;
+  // Both X.509 parsers require the signature algorithm after the TBSCertificate to be
+  // byte-identical to the one inside it.
+  const outerSignature = derDecode(der, tbs.end, root.end);
+  if (outerSignature?.tag !== 0x30 || der.slice(outerSignature.start, outerSignature.end) !== der.slice(signature.start, signature.end)) {
+    return null;
+  }
   let extensions = [];
   if (origin.x509 === "go") {
     if (version >= 1) {
