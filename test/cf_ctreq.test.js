@@ -35,15 +35,15 @@ const ext = (oid, critical, value) =>
   seq(tlv(0x06, oid), critical ? tlv(0x01, [0xff]) : Buffer.alloc(0), tlv(0x04, value));
 const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
 
-// version is the content of the [0] version INTEGER (default v3), or null to omit it (v1).
-// beforeExtensions and afterExtensions are raw bytes placed around the [3] extensions
-// field, which extensionsField replaces.
-function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], beforeExtensions = [], extensionsField, afterExtensions = [] } = {}) {
+// version is the content of the [0] version INTEGER (default v3), or null to omit it (v1);
+// versionField replaces the whole [0] field. beforeExtensions and afterExtensions are
+// raw bytes placed around the [3] extensions field, which extensionsField replaces.
+function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], versionField, beforeExtensions = [], extensionsField, afterExtensions = [] } = {}) {
   const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
   const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
   const time = tlv(0x17, Buffer.from("260101000000Z"));
   const tbs = seq(
-    version === null ? Buffer.alloc(0) : tlv(0xa0, tlv(0x02, version)),
+    versionField ? Buffer.from(versionField) : version === null ? Buffer.alloc(0) : tlv(0xa0, tlv(0x02, version)),
     tlv(0x02, [1]),
     alg,
     name("Test CA"),
@@ -51,7 +51,7 @@ function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2]
     name(subject),
     seq(alg, tlv(0x03, [0, ...Array(32).fill(1)])),
     Buffer.from(beforeExtensions),
-    extensionsField ?? (extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0)),
+    extensionsField ? Buffer.from(extensionsField) : extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0),
     Buffer.from(afterExtensions),
   );
   return seq(tbs, alg, tlv(0x03, [0, ...Array(64).fill(2)]));
@@ -403,6 +403,29 @@ test("extension OIDs are decoded as the origin's X.509 parser decodes them", asy
   const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, paddedCT)))]));
   res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc] }));
   assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }));
+});
+
+test("explicitly tagged fields are parsed as the origin's X.509 parser parses them", async () => {
+  // certificate-transparency-go's encoding/asn1 (Sunlight, Trillian) ignores the length
+  // of the [0] and [3] wrappers, reading the element after the header instead.
+  const want = (tesseract, ctgo) => expected({ tesseract, sunlight: ctgo, trillian: ctgo, common: tesseract === "forwarded" || ctgo === "forwarded" ? "forwarded" : tesseract });
+  const cases = [
+    ["[0] longer than its INTEGER", "add-chain", makeCert({ versionField: [0xa0, 0x7f, 0x02, 0x01, 0x02] }), want("cert-unparseable", "forwarded")],
+    ["[3] longer than its SEQUENCE", "add-pre-chain", makeCert({ extensionsField: Buffer.concat([Buffer.from([0xa3, 0x7f]), seq(POISON_EXT)]) }), want("cert-unparseable", "forwarded")],
+    ["[3] shorter than its SEQUENCE", "add-pre-chain", makeCert({ extensionsField: Buffer.concat([Buffer.from([0xa3, 0x01]), seq(POISON_EXT)]) }), want("cert-unparseable", "forwarded")],
+    // ... and treats [3] as absent if that element isn't a SEQUENCE.
+    ["[3] containing a NULL", "add-chain", makeCert({ extensionsField: tlv(0xa3, NULL) }), want("cert-unparseable", "forwarded")],
+    // It parses the header of whatever follows the public key, and rejects the
+    // certificate if it is malformed, or (for the explicitly tagged [3]) if nothing
+    // follows it, but Go's crypto/x509 (TesseraCT) only checks its first byte.
+    ["malformed header after the public key", "add-chain", makeCert({ afterExtensions: [0x04, 0x85] }), want("forwarded", "cert-unparseable")],
+    ["empty element at the end of the TBSCertificate", "add-chain", makeCert({ afterExtensions: NULL }), want("forwarded", "cert-unparseable")],
+    ["empty [3]", "add-chain", makeCert({ extensionsField: [0xa3, 0x00, ...NULL] }), want("cert-unparseable", "cert-unparseable")],
+  ];
+  for (const [name, endpoint, cert, outcomeWanted] of cases) {
+    const res = await snippet.fetch(post(`/ct/v1/${endpoint}`, { chain: [b64(cert), ISSUER] }));
+    assert.equal(outcome(res), outcomeWanted, name);
+  }
 });
 test("unparseable certificates are rejected in any position", async () => {
   const garbage = b64(der(Array(160).fill(0xab)));

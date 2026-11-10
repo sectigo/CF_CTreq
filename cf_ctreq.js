@@ -151,6 +151,59 @@ function derDecode(data, i, end = data.length) {
   return { tag, length, offset, end: offset + length, start: i };
 }
 
+// Decodes a TLV header at index i of a binary string as certificate-transparency-go's
+// encoding/asn1 does (it accepts high tag numbers, which DER allows), returning
+// { tag, number, length, offset } (tag being the first byte, and number the tag
+// number), or null if the header is malformed. Unlike derDecode(), it doesn't check
+// that the value fits before end, as that package doesn't for an explicit tag.
+function ctgoHeader(data, i, end) {
+  if (i >= end) {
+    return null;
+  }
+  const tag = data.charCodeAt(i++);
+  let number = tag & 0x1f;
+  if (number === 0x1f) {
+    number = 0;
+    for (let n = 0; ; n++) {
+      if (i >= end || n === 5) {
+        return null;
+      }
+      const byte = data.charCodeAt(i++);
+      number = number * 128 + (byte & 0x7f);
+      if (byte < 0x80) {
+        break;
+      }
+    }
+    if (number < 0x1f || number > 0x7fffffff) {
+      return null; // Should have used the low tag number form, or too large.
+    }
+  }
+  if (i >= end) {
+    return null;
+  }
+  let length = data.charCodeAt(i++);
+  if (length >= 0x80) {
+    const n = length & 0x7f;
+    if (n === 0) {
+      return null; // Indefinite length.
+    }
+    length = 0;
+    for (let j = 0; j < n; j++) {
+      if (i >= end || length >= 1 << 23) {
+        return null; // Truncated, or too large.
+      }
+      length = length * 256 + data.charCodeAt(i++);
+      if (length === 0) {
+        return null; // Leading zero byte.
+      }
+    }
+    if (length < 0x80) {
+      return null; // Should have used the short form.
+    }
+  }
+  return { tag, number, length, offset: i };
+}
+
 // Decodes all TLVs directly inside parent, or returns null if any is malformed.
 function derChildren(data, parent) {
   const children = [];
@@ -201,14 +254,12 @@ function oidString(contents, origin) {
   return [both < 80 ? Math.floor(both / 40) : 2, both < 80 ? both % 40 : both - 80, ...rest].join(".");
 }
 
-// Parses the extensions inside a certificate's [3] wrapper into { oid, critical, value }
-// entries (oid is in dotted form; value is the DER location of the extnValue
-// contents), or returns null if they are malformed, as the origin's X.509 parser
-// would. Only Go's crypto/x509 rejects two extensions of the same type.
-function certExtensions(cert, wrapper, origin) {
-  // As for both X.509 parsers, anything after the SEQUENCE inside [3] is ignored.
-  const list = derDecode(cert, wrapper.offset, wrapper.end);
-  const entries = list !== null && list.tag === 0x30 ? derChildren(cert, list) : null;
+// Parses the SEQUENCE of extensions inside a certificate's [3] wrapper into
+// { oid, critical, value } entries (oid is in dotted form; value is the DER location
+// of the extnValue contents), or returns null if they are malformed, as the origin's
+// X.509 parser would. Only Go's crypto/x509 rejects two extensions of the same type.
+function certExtensions(cert, list, origin) {
+  const entries = derChildren(cert, list);
   if (entries === null) {
     return null;
   }
@@ -245,11 +296,14 @@ function certExtensions(cert, wrapper, origin) {
 // Parses a certificate into { der, issuer, subject, extensions } (the names being DER
 // encodings including headers), or returns null if the origin's X.509 parser would
 // reject it. The TBSCertificate is read field by field, as far as the extensions, as
-// both X.509 parsers read it: the optional unique IDs and extensions are only found
-// directly after the public key, and anything after them is ignored. Go's crypto/x509
-// (TesseraCT) only accepts v1, v2 and v3, and only reads the unique IDs from v2 and
-// v3 certificates and the extensions from v3 certificates; certificate-transparency-go's
-// x509 (Sunlight, Trillian) accepts any version and reads them regardless.
+// the origin's parser reads it: the optional unique IDs and extensions are only found
+// directly after the public key, and anything after them is ignored.
+// - Go's crypto/x509 (TesseraCT) only accepts v1, v2 and v3, and only reads the unique
+//   IDs from v2 and v3 certificates and the extensions from v3 certificates.
+// - certificate-transparency-go's x509 (Sunlight, Trillian) accepts any version and
+//   reads them regardless. Its encoding/asn1 ignores the length of an explicitly
+//   tagged field ([0] version, [3] extensions), reading the element after its header
+//   instead, and treats [3] as absent if that element isn't a SEQUENCE.
 function parseCert(der, origin) {
   const root = derDecode(der, 0);
   const tbs = root && derDecode(der, root.offset, root.end);
@@ -267,16 +321,23 @@ function parseCert(der, origin) {
     }
     return field;
   };
+  // Moves past the header of an explicitly tagged field, as certificate-transparency-go
+  // does, or returns false if it would reject it (for being empty, or having nothing
+  // after its header).
+  const skipExplicitHeader = (header) => {
+    if (header === null || header.length === 0 || header.offset === tbs.end) {
+      return false;
+    }
+    i = header.offset;
+    return true;
+  };
 
   // version [0] EXPLICIT INTEGER DEFAULT v1 (0), which may also be encoded explicitly.
   let version = 0;
   if (peek(0xa0)) {
-    const wrapper = read(0xa0);
-    if (wrapper === null) {
-      return null;
-    }
     if (origin.x509 === "go") {
-      const integer = derDecode(der, wrapper.offset, wrapper.end);
+      const wrapper = read(0xa0);
+      const integer = wrapper && derDecode(der, wrapper.offset, wrapper.end);
       if (integer === null || integer.tag !== 0x02 || integer.length !== 1 || integer.end !== wrapper.end) {
         return null;
       }
@@ -284,6 +345,8 @@ function parseCert(der, origin) {
       if (version > 2) {
         return null; // Unknown (v4 or later) or negative.
       }
+    } else if (!skipExplicitHeader(ctgoHeader(der, i, tbs.end)) || read(0x02) === null) {
+      return null; // Its value isn't checked, as any version is accepted.
     }
   }
   // serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo.
@@ -293,18 +356,53 @@ function parseCert(der, origin) {
   }
   const [, , issuer, , subject] = fields;
   let extensions = [];
-  if (origin.x509 === "ctgo" || version >= 1) {
-    // issuerUniqueID [1] and subjectUniqueID [2], both IMPLICIT and optional.
-    if ((peek(0x81) && read(0x81) === null) || (peek(0x82) && read(0x82) === null)) {
-      return null;
+  if (origin.x509 === "go") {
+    if (version >= 1) {
+      // issuerUniqueID [1] and subjectUniqueID [2], both IMPLICIT and optional.
+      if ((peek(0x81) && read(0x81) === null) || (peek(0x82) && read(0x82) === null)) {
+        return null;
+      }
+      if (version === 2 && peek(0xa3)) {
+        // As in Go, anything after the SEQUENCE inside [3] is ignored.
+        const wrapper = read(0xa3);
+        const list = wrapper && derDecode(der, wrapper.offset, wrapper.end);
+        extensions = list !== null && list.tag === 0x30 ? certExtensions(der, list, origin) : null;
+      }
     }
-    if ((origin.x509 === "ctgo" || version === 2) && peek(0xa3)) {
-      const wrapper = read(0xa3);
-      extensions = wrapper && certExtensions(der, wrapper, origin);
-      if (extensions === null) {
+  } else {
+    // certificate-transparency-go parses the header of the next element (if any) for
+    // each optional field in turn, rejecting the certificate if it is malformed.
+    for (const tag of [0x81, 0x82]) {
+      const header = i < tbs.end ? ctgoHeader(der, i, tbs.end) : undefined;
+      if (header === null) {
+        return null;
+      }
+      if (header?.tag === tag && read(tag) === null) {
         return null;
       }
     }
+    if (i < tbs.end) {
+      const header = ctgoHeader(der, i, tbs.end);
+      if (header === null || header.offset === tbs.end) {
+        return null; // An explicitly tagged field would have nothing after its header.
+      }
+      if ((header.tag & 0xc0) === 0x80 && header.number === 3 && (header.length === 0 || header.tag & 0x20)) {
+        if (!skipExplicitHeader(header)) {
+          return null;
+        }
+        const inner = ctgoHeader(der, i, tbs.end);
+        if (inner === null) {
+          return null;
+        }
+        if (inner.tag === 0x30) {
+          const list = read(0x30);
+          extensions = list && certExtensions(der, list, origin);
+        }
+      }
+    }
+  }
+  if (extensions === null) {
+    return null;
   }
   return {
     der,
