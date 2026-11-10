@@ -497,6 +497,27 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
   assert.equal(forwarded, null);
 });
 
+test("rejections of a chain entry identify it in the problem's detail", async () => {
+  const ADD = "/ct/v1/add-chain";
+  const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
+  const cases = [
+    [post(ADD, { chain: [CERT, "!!!"] }), "entry-not-base64", "chain[1] is not a string of standard, padded base64"],
+    [post(ADD, { chain: [CERT, ISSUER, b64(der(Array(100).fill(0xab)))] }), "entry-too-short", "chain[2] is 102 bytes long, fewer than 128"],
+    [post(ADD, { chain: [CERT, b64(Buffer.from([0x31, 0x81, 0xa0, ...Array(160).fill(0xab)]))] }), "entry-not-der", "chain[1] is not a DER SEQUENCE of the declared length"],
+    [post(ADD, { chain: [CERT, b64(der(Array(160).fill(0xab)))] }), "cert-unparseable", "chain[1] cannot be parsed as an X.509 certificate"],
+    [post(ADD, { chain: [CERT, ISSUER, otherCA] }), "issuer-mismatch", "the issuer of chain[1] does not match the subject of chain[2]"],
+  ];
+  for (const [req, reason, detail] of cases) {
+    const res = await snippet.fetch(req);
+    assert.equal(res.headers.get("X-CTreq-Reject"), reason);
+    const problem = await res.json();
+    assert.equal(problem.detail, detail, reason);
+  }
+  // Other rejections have no detail.
+  const res = await snippet.fetch(post(ADD, "not json"));
+  assert.equal((await res.json()).detail, undefined);
+});
+
 test("malformed requests are rejected", async () => {
   for (const body of ["not json", "{}", '{"chain":[]}', '{"chain":[1]}', '{"chain":["!!!"]}']) {
     const res = await snippet.fetch(post("/ct/v1/add-chain", body));

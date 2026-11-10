@@ -462,17 +462,21 @@ function isPrecertSigningCert({ der, extensions }, origin) {
   });
 }
 
-// A rejection, as the arguments of errorResponse().
-const rejection = (reason, message, status = 400, headers = {}) => ({ reason, message, status, headers });
+// A rejection, as the argument of errorResponse(). The message is the problem's title,
+// which describes the reason; any details of this occurrence go in the detail.
+const rejection = (reason, message, status = 400, headers = {}, detail = undefined) => ({ reason, message, status, headers, detail });
+// A rejection of the chain entry with the given index, which the detail identifies.
+const entryRejection = (reason, message, index, detail) => rejection(reason, message, 400, {}, `chain[${index}] ${detail}`);
 
 // Parses a chain of DER certificates (each already known to be a DER SEQUENCE) as the
-// origin's X.509 parser would, or returns null if it would reject any of them.
+// origin's X.509 parser would, returning the parsed certificates, or the index of the
+// first one that it would reject.
 function parseChain(ders, origin) {
   const certs = [];
-  for (const der of ders) {
+  for (const [index, der] of ders.entries()) {
     const parsed = parseCert(der, origin);
     if (parsed === null) {
-      return null;
+      return index;
     }
     certs.push(parsed);
   }
@@ -482,8 +486,8 @@ function parseChain(ders, origin) {
 // Returns the rejection, if any, that the origin would make for a chain parsed by
 // parseChain(), or null if it would accept it as far as this snippet checks.
 function chainRejection(origin, certs, isPreChainAPI) {
-  if (certs === null) {
-    return rejection("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate");
+  if (!Array.isArray(certs)) {
+    return entryRejection("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate", certs, "cannot be parsed as an X.509 certificate");
   }
 
   const { der: firstDer, extensions } = certs[0];
@@ -508,7 +512,7 @@ function chainRejection(origin, certs, isPreChainAPI) {
   }
   for (let i = 0; i + 1 < certs.length; i++) {
     if (certs[i].issuer !== certs[i + 1].subject) {
-      return rejection("issuer-mismatch", "issuer of a certificate does not match the subject of the next certificate in the chain");
+      return rejection("issuer-mismatch", "issuer of a certificate does not match the subject of the next certificate in the chain", 400, {}, `the issuer of chain[${i}] does not match the subject of chain[${i + 1}]`);
     }
   }
   return null;
@@ -563,8 +567,8 @@ async function readBody(request, maxBytes) {
 // If any of the environment's origins allows any origin in its responses (as Sunlight
 // does, so that browsers can read them), rejections do too, except 405 responses,
 // which Sunlight's router sends without it.
-function errorResponse({ reason, message, status, headers }, origins) {
-  const problem = { type: CONFIG.problemTypeBase + reason, title: message, status };
+function errorResponse({ reason, message, status, headers, detail }, origins) {
+  const problem = { type: CONFIG.problemTypeBase + reason, title: message, status, ...(detail !== undefined && { detail }) };
   const cors = status !== 405 && origins.some((o) => o.allowsAnyOrigin) ? { "Access-Control-Allow-Origin": "*" } : {};
   return new Response(JSON.stringify(problem) + "\n", {
     status,
@@ -610,22 +614,22 @@ function bodyRejectionOrChain(body) {
     return rejection("chain-too-long", "chain has too many entries");
   }
   const ders = [];
-  for (const entry of chain) {
+  for (const [index, entry] of chain.entries()) {
     let base64 = typeof entry === "string" ? entry : null;
     if (base64 !== null && (base64.includes("\n") || base64.includes("\r"))) {
       base64 = base64.replace(LINE_BREAKS, "");
     }
     if (base64 === null || base64.length % 4 !== 0 || !BASE64.test(base64)) {
-      return rejection("entry-not-base64", "chain entries must be base64 strings");
+      return entryRejection("entry-not-base64", "chain entries must be base64 strings", index, "is not a string of standard, padded base64");
     }
     // atob() returns a "binary string" (one char per byte).
     const der = atob(base64);
     if (der.length < CONFIG.minCertBytes) {
-      return rejection("entry-too-short", "chain entry is too short to be a certificate");
+      return entryRejection("entry-too-short", "chain entry is too short to be a certificate", index, `is ${der.length} bytes long, fewer than ${CONFIG.minCertBytes}`);
     }
     const root = derDecode(der, 0);
     if (root === null || root.tag !== 0x30 || root.end !== der.length) {
-      return rejection("entry-not-der", "chain entry is not a DER SEQUENCE of the declared length");
+      return entryRejection("entry-not-der", "chain entry is not a DER SEQUENCE of the declared length", index, "is not a DER SEQUENCE of the declared length");
     }
     ders.push(der);
   }
