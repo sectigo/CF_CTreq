@@ -204,8 +204,8 @@ curl "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/logpush/jobs" \
 		"dataset": "http_requests",
 		"output_options": {
 			"field_names": [
-				"RayID", "EdgeStartTimestamp", "ClientRequestHost", "ClientRequestMethod",
-				"ClientRequestPath", "EdgeResponseStatus", "OriginResponseStatus",
+				"RayID", "EdgeStartTimestamp", "ClientIP", "ClientASN", "ClientRequestHost", "ClientRequestMethod",
+				"ClientRequestPath", "ClientRequestUserAgent", "EdgeResponseStatus", "OriginResponseStatus",
 				"MatchedRules", "ResponseHeaders"
 			],
 			"timestamp_format": "rfc3339"
@@ -214,7 +214,7 @@ curl "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/logpush/jobs" \
 	}'
 ```
 
-Each logged request then has `"ResponseHeaders": {"x-ctreq-reject": "<reason>"}`.  `OriginResponseStatus` is `0` when Cloudflare answered without contacting the origin, as the Snippet does when it rejects a request, and `MatchedRules` lists the Cloudflare Rules products (including snippets) that matched.  Logpush [filters](https://developers.cloudflare.com/logs/logpush/logpush-job/filters/) and sampling can reduce the volume.  Response headers are logged as transformed values by default; the raw variant, which is only configurable through the API, refers to headers received from the origin.
+Each logged request then has `"ResponseHeaders": {"x-ctreq-reject": "<reason>"}`, and `ClientIP`, `ClientASN` (its network's AS number) and `ClientRequestUserAgent` identify the client that sent it.  `ClientIP` is the address that connected to Cloudflare, so it is the client's own unless the client used a proxy.  IP addresses are personal data under the GDPR, so your retention and privacy policies may need to cover them; logging `ClientASN` without `ClientIP` identifies clients less precisely, but without their addresses.  `OriginResponseStatus` is `0` when Cloudflare answered without contacting the origin, as the Snippet does when it rejects a request, and `MatchedRules` lists the Cloudflare Rules products (including snippets) that matched.  Logpush [filters](https://developers.cloudflare.com/logs/logpush/logpush-job/filters/) and sampling can reduce the volume.  Response headers are logged as transformed values by default; the raw variant, which is only configurable through the API, refers to headers received from the origin.
 
 ### Elastic
 
