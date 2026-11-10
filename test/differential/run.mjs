@@ -3,6 +3,11 @@
 // responses to a generated corpus with the verdicts of origin models that use the
 // origins' own parsers (see origins/main.go). Requires Go.
 //
+// With --replay, the corpus is instead recent real entries from the logs in Google's
+// log list (see replay.mjs), each sent to the endpoint it was submitted to; this needs
+// network access. Entries whose requests would exceed the snippet's body size limit
+// are skipped.
+//
 // Environment variables:
 //   CTREQ_DIFF_COUNT   number of requests to generate (default 10000)
 //   CTREQ_DIFF_SEED    seed for the generator (default 1)
@@ -10,11 +15,14 @@
 //                      certificate-transparency-go versions to use for the Sunlight and
 //                      Trillian models (default: those in versions.json)
 //   CTREQ_DIFF_SNIPPET path of the snippet to test (default: cf_ctreq.js)
+//   CTREQ_REPLAY_ENTRIES, CTREQ_REPLAY_LOGS
+//                      with --replay, the entries per log and the logs (see replay.mjs)
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generate } from "./generate.mjs";
+import { replay } from "./replay.mjs";
 
 const here = new URL(".", import.meta.url).pathname;
 const SOURCE = readFileSync(process.env.CTREQ_DIFF_SNIPPET || new URL("../../cf_ctreq.js", import.meta.url), "utf8");
@@ -23,6 +31,8 @@ const sunlightVersion = process.env.CTREQ_DIFF_SUNLIGHT || versions.sunlight;
 const trillianVersion = process.env.CTREQ_DIFF_TRILLIAN || versions.trillian;
 const count = Number(process.env.CTREQ_DIFF_COUNT || 10000);
 const seed = Number(process.env.CTREQ_DIFF_SEED || 1);
+const replaying = process.argv.includes("--replay");
+const warn = (message) => console.log(process.env.GITHUB_ACTIONS ? `::warning::${message}` : `Warning: ${message}`);
 
 // The origins whose models must all reject a request for the snippet to reject it, for
 // each environment (as ENVIRONMENTS in cf_ctreq.js).
@@ -63,11 +73,21 @@ function runModels(version, models, corpusFile, verdicts) {
   }
 }
 
-const corpus = generate({ seed, count });
+let corpus;
+if (replaying) {
+  const maxBodyBytes = SOURCE.match(/maxBodyBytes: ([\d *]+),/)[1].split("*").reduce((a, b) => a * Number(b), 1);
+  const { items, logs, failed } = await replay({ log: () => {} });
+  for (const { name, error } of failed) warn(`couldn't read ${name}: ${error}`);
+  corpus = items.filter(({ body }) => Buffer.byteLength(body) <= maxBodyBytes);
+  console.log(`Replaying ${corpus.length} real entries from ${logs - failed.length} of ${logs} logs (skipped ${items.length - corpus.length} larger than ${maxBodyBytes} bytes).`);
+  if (!corpus.length) throw new Error("no entries to replay");
+} else {
+  corpus = generate({ seed, count });
+  console.log(`Generated ${corpus.length} requests (seed ${seed}).`);
+}
 const work = mkdtempSync(join(tmpdir(), "ctreq-differential-"));
 const corpusFile = join(work, "corpus.jsonl");
 writeFileSync(corpusFile, corpus.map((item) => JSON.stringify(item)).join("\n") + "\n");
-console.log(`Generated ${corpus.length} requests (seed ${seed}).`);
 console.log(`Origin models: TesseraCT (Go ${spawnSync("go", ["env", "GOVERSION"], { encoding: "utf8" }).stdout.trim()} crypto/x509), Sunlight (certificate-transparency-go ${sunlightVersion}), Trillian (certificate-transparency-go ${trillianVersion}).`);
 
 const verdicts = {};
@@ -82,11 +102,12 @@ if (sunlightVersion === trillianVersion) {
 globalThis.fetch = async () => new Response("origin");
 const falseRejections = [];
 const summary = {};
+const correctRejections = {};
 for (const [environment, members] of Object.entries(ENVIRONMENTS)) {
   const snippet = await loadSnippet(environment);
   const counts = (summary[environment] = { requests: 0, accepted: 0, "false rejections": 0, missed: 0 });
-  for (const { id, body } of corpus) {
-    for (const endpoint of ENDPOINTS) {
+  for (const { id, body, endpoint: submittedTo } of corpus) {
+    for (const endpoint of submittedTo ? [submittedTo] : ENDPOINTS) {
       const res = await snippet.fetch(new Request(`https://log.example.com/ct/v1/${endpoint}`, { method: "POST", body }));
       const outcome = res.headers.get("X-CTreq-Reject") ?? "forwarded";
       const accepters = members.filter((model) => verdicts[id][model][endpoint] === "accept");
@@ -97,16 +118,25 @@ for (const [environment, members] of Object.entries(ENVIRONMENTS)) {
         falseRejections.push({ environment, endpoint, outcome, accepters, id, body });
       } else if (outcome === "forwarded" && !accepters.length) {
         counts.missed++;
+      } else if (outcome !== "forwarded" && replaying) {
+        const reasons = (correctRejections[environment] ??= {});
+        reasons[outcome] = (reasons[outcome] ?? 0) + 1;
       }
     }
   }
 }
 
-console.log("\nPer environment (requests x endpoints; 'accepted' = some origin in the environment would accept;");
+console.log(`\nPer environment (${replaying ? "requests" : "requests x endpoints"}; 'accepted' = some origin in the environment would accept;`);
 console.log("'missed' = forwarded, though every origin in it would reject):");
 console.table(summary);
+if (replaying && Object.keys(correctRejections).length) {
+  console.log("\nReal entries that the snippet rejected, as every origin in the environment would:");
+  for (const [environment, reasons] of Object.entries(correctRejections)) {
+    console.log(`  ${environment}: ${Object.entries(reasons).map(([reason, n]) => `${reason} ${n}`).join(", ")}`);
+  }
+}
 if (falseRejections.length) {
-  const file = join(tmpdir(), `ctreq-false-rejections-${seed}.jsonl`);
+  const file = join(tmpdir(), `ctreq-false-rejections-${replaying ? "replay" : seed}.jsonl`);
   writeFileSync(file, falseRejections.map((f) => JSON.stringify(f)).join("\n") + "\n");
   console.log(`\n${falseRejections.length} FALSE REJECTIONS (all written to ${file}); the first few:`);
   for (const f of falseRejections.slice(0, 5)) {
