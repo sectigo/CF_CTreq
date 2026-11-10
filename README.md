@@ -265,13 +265,21 @@ npm run test:differential
 
 `CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions.  They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request.
 
-The origins change over time, so an [origin drift](.github/workflows/drift.yml) workflow also runs weekly (and for pull requests that change the differential tests).  It runs the differential tests against the latest versions of the origins' parsers (the latest Go, and the `certificate-transparency-go` versions on Sunlight's `main` and Trillian's `master` branches), and it checks whether any of the upstream source files that determine the origins' rejection criteria (listed in [`upstream.json`](test/differential/upstream.json)) have changed since they were last reviewed:
+Generated requests can only explore the variants that the generator knows about, so the tests can also replay real ones: recent entries (256 per log by default) from every usable or qualified log in [Google's log list](https://www.gstatic.com/ct/log_list/v3/log_list.json), both RFC 6962 logs (`get-entries`) and static-ct-api logs (data tiles and issuers), each rebuilt as the `add-chain` or `add-pre-chain` request that could have submitted it and compared in the same way.  This needs network access:
+
+```
+npm run test:replay
+```
+
+`CTREQ_REPLAY_ENTRIES` changes the number of entries per log, and `CTREQ_REPLAY_LOGS` limits the logs to those whose descriptions contain one of its comma-separated substrings (e.g. `argon,tuscolo`).  [`replay.mjs`](test/differential/replay.mjs) on its own writes the requests as JSON lines.
+
+The origins change over time, so an [origin drift](.github/workflows/drift.yml) workflow also runs weekly (and for pull requests that change the differential tests).  It runs the differential tests and the replay against the latest versions of the origins' parsers (the latest Go, and the `certificate-transparency-go` versions on Sunlight's `main` and Trillian's `master` branches), and it checks whether any of the upstream source files that determine the origins' rejection criteria (listed in [`upstream.json`](test/differential/upstream.json)) have changed since they were last reviewed:
 
 ```
 node test/differential/upstream.mjs
 ```
 
-If either fails, the workflow opens an issue.  After reviewing upstream changes (and updating the snippet, the origin models or `versions.json` if necessary), record them with `node test/differential/upstream.mjs --update`.
+If any of these fails, the workflow opens an issue.  After reviewing upstream changes (and updating the snippet, the origin models or `versions.json` if necessary), record them with `node test/differential/upstream.mjs --update`.
 
 ### Testing a deployed log
 
