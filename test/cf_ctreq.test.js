@@ -634,3 +634,22 @@ test("other requests pass through untouched", async () => {
   assert.equal(res.status, 200);
   assert.equal(forwarded.body, "xyz");
 });
+
+test("endpoint paths are matched after percent-decoding each segment, as by the origin", async () => {
+  // Go's http.ServeMux routes these to the add-chain and add-pre-chain handlers.
+  for (const path of ["/2026h1/ct/v1/add%2Dchain", "/ct/v1/%61dd-chain", "/%63t/%76%31/add-chain"]) {
+    const res = await snippet.fetch(post(path, { chain: [PRECERT, ISSUER] }));
+    assert.equal(res.headers.get("X-CTreq-Reject"), "precert-on-add-chain", path);
+  }
+  const res = await snippet.fetch(post("/ct/v1/add%2dpre%2Dchain", { chain: [CERT, ISSUER] }));
+  assert.equal(res.headers.get("X-CTreq-Reject"), "cert-on-add-pre-chain");
+  assert.equal(forwarded, null);
+  // Go doesn't route these to either handler: an encoded "/" doesn't separate segments,
+  // and invalid percent-encoding is rejected.
+  for (const path of ["/ct%2Fv1/add-chain", "/ct/v1%2Fadd-chain", "/ct/v1/add-chain%zz", "/v1/add-chain", "/xct/v1/add-chain"]) {
+    forwarded = null;
+    const res = await snippet.fetch(post(path, "xyz"));
+    assert.equal(res.status, 200, path);
+    assert.equal(forwarded.body, "xyz", path);
+  }
+});
