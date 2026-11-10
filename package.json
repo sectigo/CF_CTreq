@@ -4,6 +4,9 @@
   "private": true,
   "description": "Cloudflare Snippet that preprocesses Certificate Transparency log add-chain and add-pre-chain requests",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "test": "node --test"
   }
