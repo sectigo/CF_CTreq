@@ -62,15 +62,11 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 #### cert-unparseable
 
-`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.  As in DER, every length must be minimally encoded, and an extension's `critical` flag, if present, must be `0x00` or `0xFF`.
+`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.  As in DER, every length must be minimally encoded, the version must be v1, v2 or v3, and an extension's `critical` flag, if present, must be `0x00` or `0xFF`.  As by the origin, extensions are only read from v3 certificates; any in a v1 or v2 certificate are ignored, by this and the following checks.
 
 #### poison-invalid
 
 `400 Bad Request` if the first certificate has a CT Poison extension (OID `1.3.6.1.4.1.11129.2.4.3`) that is not critical or whose value is not `NULL`.
-
-#### poison-with-sct-list
-
-`400 Bad Request` if the first certificate has a CT Poison extension and also an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`).
 
 #### precert-on-add-chain
 
@@ -79,10 +75,6 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 #### cert-on-add-pre-chain
 
 `400 Bad Request` if the first certificate has no CT Poison extension and the request was sent to `add-pre-chain`.
-
-#### psc-on-add-chain
-
-`400 Bad Request` if the request was sent to `add-chain` and the second certificate is a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`).
 
 #### issuer-mismatch
 

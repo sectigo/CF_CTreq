@@ -17,12 +17,13 @@ const ext = (oid, critical, value) =>
   seq(tlv(0x06, oid), critical ? tlv(0x01, [0xff]) : Buffer.alloc(0), tlv(0x04, value));
 const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
 
-function makeCert({ extensions, subject = Buffer.alloc(100, 0x61) } = {}) {
+// version is the content of the [0] version INTEGER (default v3), or null to omit it (v1).
+function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2] } = {}) {
   const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
   const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
   const time = tlv(0x17, Buffer.from("260101000000Z"));
   const tbs = seq(
-    tlv(0xa0, tlv(0x02, [2])),
+    version === null ? Buffer.alloc(0) : tlv(0xa0, tlv(0x02, version)),
     tlv(0x02, [1]),
     alg,
     name("Test CA"),
@@ -253,28 +254,46 @@ test("poison extension with a non-NULL value is rejected", async () => {
   assert.equal(forwarded, null);
 });
 
-test("poison together with an embedded SCT list is rejected", async () => {
+test("poison together with an embedded SCT list is forwarded, as the origin accepts it", async () => {
   const sctList = ext(ctOid(2), false, [0x04, 0x00]);
-  const both = b64(makeCert({ extensions: [POISON_EXT, sctList] }));
-  const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [both, ISSUER] }));
-  assert.equal(res.status, 400);
-  assert.equal(forwarded, null);
-  const sctOnly = b64(makeCert({ extensions: [sctList] }));
-  assert.equal((await snippet.fetch(post("/ct/v1/add-chain", { chain: [sctOnly, ISSUER] }))).status, 200);
+  const body = JSON.stringify({ chain: [b64(makeCert({ extensions: [POISON_EXT, sctList] })), ISSUER] });
+  const res = await snippet.fetch(post("/ct/v1/add-pre-chain", body));
+  assert.equal(res.status, 200);
+  assert.equal(forwarded.body, body);
 });
 
-test("precertificate signing certificate is rejected as the issuer on add-chain only", async () => {
+test("precertificate signing certificate is accepted as the issuer on either endpoint, as by the origin", async () => {
   const eku = (...oids) => ext(OID_EKU, false, seq(...oids.map((o) => tlv(0x06, o))));
   const serverAuth = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
   const psc = b64(makeCA([eku(serverAuth, ctOid(4))]));
-  const plainEku = b64(makeCA([eku(serverAuth)]));
   let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, psc] }));
-  assert.equal(res.status, 400);
-  assert.equal(forwarded, null);
+  assert.equal(res.status, 200);
   res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }));
   assert.equal(res.status, 200);
-  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, plainEku] }));
-  assert.equal(res.status, 200);
+});
+
+test("extensions are ignored in v1 and v2 certificates, as by the origin", async () => {
+  const malformed = seq(tlv(0x04, [1]), tlv(0x04, [2]));
+  // v1 (no version field, or explicitly 0) and v2.
+  for (const version of [null, [0], [1]]) {
+    const label = JSON.stringify(version);
+    const poisoned = b64(makeCert({ version, extensions: [POISON_EXT] }));
+    let res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [poisoned, ISSUER] }));
+    assert.equal(res.status, 200, label);
+    res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [poisoned, ISSUER] }));
+    assert.equal(res.headers.get("X-CTreq-Reject"), "cert-on-add-pre-chain", label);
+    res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ version, extensions: [malformed] })), ISSUER] }));
+    assert.equal(res.status, 200, label);
+  }
+});
+
+test("unknown or malformed certificate versions are rejected", async () => {
+  // v4, negative, and non-minimally encoded.
+  for (const version of [[3], [0xff], [0x00, 0x02]]) {
+    const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ version })), ISSUER] }));
+    assert.equal(res.headers.get("X-CTreq-Reject"), "cert-unparseable", JSON.stringify(version));
+  }
+  assert.equal(forwarded, null);
 });
 
 test("unparseable certificates are rejected in any position", async () => {
@@ -297,9 +316,6 @@ test("unparseable certificates are rejected in any position", async () => {
 test("every rejection carries an X-CTreq-Reject reason", async () => {
   const ADD = "/ct/v1/add-chain";
   const PRE = "/ct/v1/add-pre-chain";
-  const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
-  const sctList = ext(ctOid(2), false, [0x04, 0x00]);
-  const poisonAndSct = b64(makeCert({ extensions: [POISON_EXT, sctList] }));
   const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
   const bigLength = post(ADD, { chain: [CERT] });
   bigLength.headers.set("Content-Length", String(128 * 1024 + 1));
@@ -315,10 +331,8 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
     "entry-not-der": post(ADD, { chain: [b64(Buffer.from([0x31, 0x81, 0xa0, ...Array(160).fill(0xab)]))] }),
     "cert-unparseable": post(ADD, { chain: [b64(der(Array(160).fill(0xab)))] }),
     "poison-invalid": post(ADD, { chain: [NONCRITICAL] }),
-    "poison-with-sct-list": post(PRE, { chain: [poisonAndSct, ISSUER] }),
     "precert-on-add-chain": post(ADD, { chain: [PRECERT] }),
     "cert-on-add-pre-chain": post(PRE, { chain: [CERT] }),
-    "psc-on-add-chain": post(ADD, { chain: [CERT, psc] }),
     "issuer-mismatch": post(ADD, { chain: [CERT, otherCA] }),
   };
   for (const [reason, req] of Object.entries(cases)) {
