@@ -373,6 +373,37 @@ test("duplicate extensions are only rejected by TesseraCT", async () => {
   assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
 });
 
+test("extension OIDs are decoded as the origin's X.509 parser decodes them", async () => {
+  // The poison OID with its 11129 arc (0xd6 0x79) padded with a leading 0x80 byte,
+  // which only certificate-transparency-go's x509 (Sunlight, Trillian) accepts.
+  const paddedPoison = [0x2b, 0x06, 0x01, 0x04, 0x01, 0x80, 0xd6, 0x79, 0x02, 0x04, 0x03];
+  const padded = b64(makeCert({ extensions: [ext(paddedPoison, true, NULL)] }));
+  let res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [padded, ISSUER] }));
+  assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
+  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [padded, ISSUER] }));
+  assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "cert-unparseable" }));
+  // A padded valid poison extension is the one checked, not a later canonical one.
+  const both = b64(makeCert({ extensions: [ext(paddedPoison, true, NULL), ext(ctOid(3), false, NULL)] }));
+  res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [both, ISSUER] }));
+  assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
+  // An empty OID, which only certificate-transparency-go's x509 accepts (when it retries laxly).
+  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ extensions: [ext([], false, NULL)] })), ISSUER] }));
+  assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
+  // Arcs that both parsers reject: 2^31, longer than 5 bytes, and truncated; and 2^31 - 1, which both accept.
+  const arcs = { "2^31": [0x2b, 0x88, 0x80, 0x80, 0x80, 0x00], "6 bytes": [0x2b, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01], truncated: [0x2b, 0x86] };
+  for (const [name, oid] of Object.entries(arcs)) {
+    res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ extensions: [ext(oid, false, NULL)] })), ISSUER] }));
+    assert.equal(outcome(res), "cert-unparseable", name);
+  }
+  res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(makeCert({ extensions: [ext([0x2b, 0x87, 0xff, 0xff, 0xff, 0x7f], false, NULL)] })), ISSUER] }));
+  assert.equal(outcome(res), "forwarded", "2^31 - 1");
+  // Sunlight also recognises a padded OID in a Precertificate Signing Certificate's
+  // extended key usage. (TesseraCT rejects one, but the snippet doesn't parse its contents.)
+  const paddedCT = [0x2b, 0x06, 0x01, 0x04, 0x01, 0x80, 0xd6, 0x79, 0x02, 0x04, 0x04];
+  const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, paddedCT)))]));
+  res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc] }));
+  assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }));
+});
 test("unparseable certificates are rejected in any position", async () => {
   const garbage = b64(der(Array(160).fill(0xab)));
   const badExtension = b64(makeCert({ extensions: [seq(tlv(0x04, [1]), tlv(0x04, [2]))] }));

@@ -32,6 +32,7 @@ All the origins parse the request body in the same way, but they differ as follo
 | `OPTIONS` (CORS preflight) | `method-not-allowed` | answered by Sunlight | `method-not-allowed` | forwarded |
 | Certificate whose version is not v1, v2 or v3, or is not minimally encoded | `cert-unparseable` | accepted | accepted | forwarded |
 | Certificate with two extensions of the same type | `cert-unparseable` | accepted | accepted | forwarded |
+| Extension whose OID is empty or not minimally encoded (an arc with a leading `0x80` byte) | `cert-unparseable` | accepted, and decoded as if minimally encoded | accepted, and decoded as if minimally encoded | forwarded, unless all would reject the request regardless |
 | Extensions in a v1 or v2 certificate | ignored | read, as in a v3 certificate | read, as in a v3 certificate | forwarded, unless all would reject the request regardless |
 | Precertificate issued by a Precertificate Signing Certificate | accepted | `psc-not-supported` | accepted | forwarded |
 
@@ -87,7 +88,7 @@ In the `sunlight` and `common` environments, rejection responses also have an `A
 
 #### cert-unparseable
 
-`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.  The TBSCertificate is read field by field as the origin's X.509 parser reads it: as in DER, every length must be minimally encoded, and an extension's `critical` flag, if present, must be `0x00` or `0xFF`.  The optional unique IDs and the extensions are only read directly after the public key; any extensions elsewhere are ignored, by this and the following checks, as is anything after the extensions or after an extension's value.  As described [above](#origin-environment), TesseraCT also requires the version to be v1, v2 or v3 and no two extensions to have the same OID, and only reads extensions from v3 certificates.
+`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.  The TBSCertificate is read field by field as the origin's X.509 parser reads it: as in DER, every length must be minimally encoded, and an extension's `critical` flag, if present, must be `0x00` or `0xFF`.  The optional unique IDs and the extensions are only read directly after the public key; any extensions elsewhere are ignored, by this and the following checks, as is anything after the extensions or after an extension's value.  As described [above](#origin-environment), TesseraCT also requires the version to be v1, v2 or v3 and no two extensions to have the same OID, and only reads extensions from v3 certificates.  Each extension's OID is decoded as the origin's X.509 parser decodes it, and its arcs must not be truncated, longer than 5 bytes, or 2<sup>31</sup> or more; extensions (such as CT Poison) are then identified by their decoded OID, so that e.g. a non-minimally encoded poison OID counts as one for Sunlight and Trillian, which accept it.
 
 #### poison-invalid
 

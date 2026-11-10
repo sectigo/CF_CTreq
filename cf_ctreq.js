@@ -66,10 +66,10 @@ function originsFor(environment) {
   return ENVIRONMENTS[environment];
 }
 
-// OID contents (without tag and length) as binary strings.
-const OID_CT_POISON = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x03"; // 1.3.6.1.4.1.11129.2.4.3
-const OID_CT_PRECERT_SIGNING = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x04"; // 1.3.6.1.4.1.11129.2.4.4
-const OID_EXT_KEY_USAGE = "\x55\x1d\x25"; // 2.5.29.37
+// OIDs in dotted form, as compared after decoding with oidString().
+const OID_CT_POISON = "1.3.6.1.4.1.11129.2.4.3";
+const OID_CT_PRECERT_SIGNING = "1.3.6.1.4.1.11129.2.4.4";
+const OID_EXT_KEY_USAGE = "2.5.29.37";
 const NULL_VALUE = "\x05\x00";
 
 // Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient. Go's
@@ -126,10 +126,47 @@ function derChildren(data, parent) {
   return children;
 }
 
+// Decodes the contents of an OBJECT IDENTIFIER (as a binary string) into its dotted
+// form, or returns null if the origin's X.509 parser would reject it. Both parsers
+// reject an arc that is truncated, longer than 5 bytes, or 2^31 or more, but only Go's
+// crypto/x509 rejects an empty OID or an arc that isn't minimally encoded (with a
+// leading 0x80 byte): certificate-transparency-go's x509 reads such an arc as the
+// same number, so e.g. a poison extension's OID needn't be encoded canonically.
+function oidString(contents, origin) {
+  if (contents.length === 0) {
+    return origin.x509 === "go" ? null : "";
+  }
+  const arcs = [];
+  let value = 0;
+  let length = 0;
+  for (let i = 0; i < contents.length; i++) {
+    const byte = contents.charCodeAt(i);
+    if ((length === 0 && byte === 0x80 && origin.x509 === "go") || ++length > 5) {
+      return null;
+    }
+    value = value * 128 + (byte & 0x7f);
+    if (byte < 0x80) {
+      if (value > 0x7fffffff) {
+        return null;
+      }
+      arcs.push(value);
+      value = 0;
+      length = 0;
+    }
+  }
+  if (length !== 0) {
+    return null; // Truncated.
+  }
+  // The first arc encodes the first two arcs (40 * first + second), the first being
+  // 0, 1 or 2.
+  const [both, ...rest] = arcs;
+  return [both < 80 ? Math.floor(both / 40) : 2, both < 80 ? both % 40 : both - 80, ...rest].join(".");
+}
+
 // Parses the extensions inside a certificate's [3] wrapper into { oid, critical, value }
-// entries (value is the DER location of the extnValue contents), or returns null if
-// they are malformed, as the origin's X.509 parser would. Only Go's crypto/x509
-// rejects two extensions of the same type.
+// entries (oid is in dotted form; value is the DER location of the extnValue
+// contents), or returns null if they are malformed, as the origin's X.509 parser
+// would. Only Go's crypto/x509 rejects two extensions of the same type.
 function certExtensions(cert, wrapper, origin) {
   // As for both X.509 parsers, anything after the SEQUENCE inside [3] is ignored.
   const list = derDecode(cert, wrapper.offset, wrapper.end);
@@ -158,8 +195,8 @@ function certExtensions(cert, wrapper, origin) {
       i = flag.end;
     }
     const value = derDecode(cert, i, entry.end);
-    const id = cert.slice(oid.offset, oid.end);
-    if (value === null || value.tag !== 0x04 || (origin.x509 === "go" && extensions.some((e) => e.oid === id))) {
+    const id = oidString(cert.slice(oid.offset, oid.end), origin);
+    if (id === null || value === null || value.tag !== 0x04 || (origin.x509 === "go" && extensions.some((e) => e.oid === id))) {
       return null;
     }
     extensions.push({ oid: id, critical, value });
@@ -243,14 +280,15 @@ function parseCert(der, origin) {
 // Sunlight (certificate-transparency-go's ct.IsPreIssuer) determines it: an extended
 // key usage extension contains the CT precertificate signing OID. Only a cleanly
 // parsed extension counts, so that this is never true when Sunlight's isn't.
-function isPrecertSigningCert({ der, extensions }) {
+function isPrecertSigningCert({ der, extensions }, origin) {
   return extensions.some((e) => {
     if (e.oid !== OID_EXT_KEY_USAGE) {
       return false;
     }
     const list = derDecode(der, e.value.offset, e.value.end);
     const oids = list !== null && list.tag === 0x30 && list.end === e.value.end ? derChildren(der, list) : null;
-    return oids !== null && oids.every((o) => o.tag === 0x06) && oids.some((o) => der.slice(o.offset, o.end) === OID_CT_PRECERT_SIGNING);
+    const ids = oids?.map((o) => (o.tag === 0x06 ? oidString(der.slice(o.offset, o.end), origin) : null));
+    return ids !== undefined && !ids.includes(null) && ids.includes(OID_CT_PRECERT_SIGNING);
   });
 }
 
@@ -287,7 +325,7 @@ function chainRejection(origin, ders, isPreChainAPI) {
   }
   // Sunlight doesn't support Precertificate Signing Certificates, as
   // c2sp.org/static-ct-api@v1.1.0 allows.
-  if (origin.rejectsPrecertSigningCerts && hasPoison && certs.length > 1 && isPrecertSigningCert(certs[1])) {
+  if (origin.rejectsPrecertSigningCerts && hasPoison && certs.length > 1 && isPrecertSigningCert(certs[1], origin)) {
     return rejection("psc-not-supported", "precertificate signing certificates are not supported");
   }
   for (let i = 0; i + 1 < certs.length; i++) {
