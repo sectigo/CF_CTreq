@@ -632,6 +632,59 @@ test("environments differ only as documented", async () => {
   await assert.rejects(loadSnippet("ctfe"), /CONFIG.environment must be "sunlight", "tesseract", "trillian", or "common", not "ctfe"/);
 });
 
+test("CONFIG.logEnvironments selects the environment by hostname and path", async () => {
+  const LOG_ENVIRONMENTS = /^(\s*logEnvironments: )\[[\s\S]*?\n  \],$/m;
+  assert.match(SOURCE, LOG_ENVIRONMENTS, "cf_ctreq.js must set CONFIG.logEnvironments to a multi-line array");
+  const load = async (logEnvironments) => {
+    const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`).replace(LOG_ENVIRONMENTS, `$1${logEnvironments},`);
+    return (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
+  };
+  // OPTIONS is only answered by Sunlight, and an unknown version only rejected by TesseraCT.
+  const v4 = b64(makeCert({ version: [3] }));
+  const behaviour = async (s, base) => {
+    const options = await s.fetch(new Request(`${base}ct/v1/add-chain`, { method: "OPTIONS" }));
+    const post = await s.fetch(new Request(`${base}ct/v1/add-chain`, { method: "POST", body: JSON.stringify({ chain: [v4, ISSUER] }) }));
+    return [outcome(options), outcome(post)];
+  };
+  const BEHAVIOUR = {
+    trillian: ["method-not-allowed", "forwarded"],
+    tesseract: ["method-not-allowed", "cert-unparseable"],
+    sunlight: ["forwarded", "forwarded"],
+    common: ["forwarded", "forwarded"],
+  };
+  const check = async (s, cases) => {
+    for (const [base, environment] of Object.entries(cases)) {
+      assert.deepEqual(await behaviour(s, base), BEHAVIOUR[environment ?? ENVIRONMENT], base);
+    }
+  };
+  // Sectigo's logs, whatever CONFIG.environment is; anything else uses CONFIG.environment.
+  await check(snippet, {
+    "https://tiger2027h1.ct.sectigo.com/": "trillian",
+    "https://elephant2026h2.ct.sectigo.com/": "trillian",
+    "https://dumbo.ctlabs.sectigo.com/": "trillian",
+    "https://tigger2026.ctlabs.sectigo.com/": "trillian",
+    "https://monument2027h1.sub.ct.sectigo.com/": "tesseract",
+    "https://billboard.sub.ct.sectigo.com/": "tesseract",
+    "https://standee.sub.ctlabs.sectigo.com/": "tesseract",
+    "https://statue2028h2.sub.ct.sectigo.com/": "tesseract",
+    "https://monument2027h1.mon.ct.sectigo.com/": null,
+    "https://mammoth2026h2.ct.sectigo.com/": null,
+    "https://tiger2027h1.ct.sectigo.com.example.com/": null,
+    "https://log.example.com/tiger2027h1.ct.sectigo.com/": null,
+  });
+  // The first matching pattern applies, and can match the path; a g flag doesn't make
+  // matches depend on earlier requests.
+  const custom = await load('[[/^ct\\.example\\.com\\/2026h2\\//, "sunlight"], [/^ct\\.example\\.com\\//g, "tesseract"]]');
+  await check(custom, {
+    "https://ct.example.com/2026h2/": "sunlight",
+    "https://ct.example.com/2027h1/": "tesseract",
+    "https://ct.example.com/2027h2/": "tesseract",
+    "https://other.example.com/2026h2/": null,
+  });
+  await assert.rejects(load('[[/tiger/, "ctfe"]]'), /CONFIG.logEnvironments\[0\]'s environment must be "sunlight", "tesseract", "trillian", or "common", not "ctfe"/);
+  await assert.rejects(load('[[/tiger/, "trillian"], ["tuscolo", "sunlight"]]'), /CONFIG.logEnvironments\[1\] must be a \[regular expression, environment\] pair/);
+});
+
 test("any or no Content-Type is accepted, as the origin does not check it", async () => {
   const body = JSON.stringify({ chain: [CERT, ISSUER] });
   for (const contentType of ["application/json", "Application/JSON; charset=utf-8", "text/plain", "application/x-www-form-urlencoded", null]) {
