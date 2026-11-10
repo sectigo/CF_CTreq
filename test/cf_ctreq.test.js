@@ -38,7 +38,8 @@ const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
 // version is the content of the [0] version INTEGER (default v3), or null to omit it (v1);
 // versionField replaces the whole [0] field. beforeExtensions and afterExtensions are
 // raw bytes placed around the [3] extensions field, which extensionsField replaces.
-function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], versionField, beforeExtensions = [], extensionsField, afterExtensions = [] } = {}) {
+// outerAlgorithm replaces the signature algorithm after the TBSCertificate.
+function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], versionField, beforeExtensions = [], extensionsField, afterExtensions = [], outerAlgorithm } = {}) {
   const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
   const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
   const time = tlv(0x17, Buffer.from("260101000000Z"));
@@ -54,7 +55,7 @@ function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2]
     extensionsField ? Buffer.from(extensionsField) : extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0),
     Buffer.from(afterExtensions),
   );
-  return seq(tbs, alg, tlv(0x03, [0, ...Array(64).fill(2)]));
+  return seq(tbs, outerAlgorithm ? Buffer.from(outerAlgorithm) : alg, tlv(0x03, [0, ...Array(64).fill(2)]));
 }
 
 const b64 = (buf) => buf.toString("base64");
@@ -418,6 +419,18 @@ test("extension OIDs are decoded as the origin's X.509 parser decodes them", asy
   const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, paddedCT)))]));
   res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc] }));
   assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }));
+});
+
+test("signature algorithms inside and after the TBSCertificate must be identical", async () => {
+  const ecdsaSHA384 = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03]));
+  const withNullParameters = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]), Buffer.from(NULL));
+  for (const [name, outerAlgorithm] of [["different algorithm", ecdsaSHA384], ["same algorithm with parameters", withNullParameters], ["not a SEQUENCE", Buffer.from(NULL)]]) {
+    for (const [path, chain] of [["/ct/v1/add-chain", [b64(makeCert({ outerAlgorithm })), ISSUER]], ["/ct/v1/add-pre-chain", [b64(makeCert({ extensions: [POISON_EXT], outerAlgorithm })), ISSUER]], ["/ct/v1/add-chain", [CERT, ISSUER, b64(makeCert({ subject: Buffer.from("Test CA"), outerAlgorithm }))]]]) {
+      const res = await snippet.fetch(post(path, { chain }));
+      assert.equal(outcome(res), "cert-unparseable", `${name} on ${path}`);
+    }
+  }
+  assert.equal(forwarded, null);
 });
 
 test("explicitly tagged fields are parsed as the origin's X.509 parser parses them", async () => {
