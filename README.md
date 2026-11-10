@@ -64,6 +64,8 @@ All the origins parse the request body in the same way, but they differ as follo
 | Request | TesseraCT | Sunlight | Trillian | `common` |
 |---|---|---|---|---|
 | `OPTIONS` (CORS preflight) | `method-not-allowed` | answered by Sunlight | `method-not-allowed` | forwarded |
+| Body of more than 128 KiB, up to 512,000 bytes | accepted | `body-too-large` | accepted | forwarded |
+| Body of more than 512,000 bytes, up to 512 KiB | accepted | `body-too-large` | `body-too-large` | forwarded |
 | Certificate whose version is not v1, v2 or v3, or is not minimally encoded | `cert-unparseable` | accepted | accepted | forwarded |
 | Certificate with two extensions of the same type | `cert-unparseable` | accepted | accepted | forwarded |
 | Extension whose OID is empty or not minimally encoded (an arc with a leading `0x80` byte) | `cert-unparseable` | accepted, and decoded as if minimally encoded | accepted, and decoded as if minimally encoded | forwarded, unless all would reject the request regardless |
@@ -98,7 +100,7 @@ In the `sunlight` and `common` environments, rejection responses (other than `40
 
 #### body-too-large
 
-`413 Content Too Large` if the `Content-Length` exceeds 128 KiB, which is checked before the body is read, or if the body itself turns out to exceed 128 KiB (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.
+`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
 
 #### invalid-json
 
@@ -159,11 +161,11 @@ As far as possible, the snippet aims to only reject requests that the origin wou
 - **Embedded SCT list in a precertificate**: a precertificate with an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`) makes little sense, but none of the origins rejects one.
 - **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm (beyond matching the one after the TBSCertificate), validity, public key and signature are not checked, and nor is anything after the extensions or after an extension's value (which all the origins also ignore).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
 
-The snippet's `CONFIG` limits are stricter than the origins' defaults: TesseraCT accepts a body of up to 512 KiB (Trillian, 512,000 bytes; Sunlight, 128 KiB) and all of them accept any number of chain entries, whereas the snippet's limits are 128 KiB (`body-too-large`) and 10 entries (`chain-too-long`), which are enough for real certificate chains.  None of the origins has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
+The snippet's limit on the number of chain entries is stricter than the origins': they accept any number, whereas the snippet accepts 10 (`chain-too-long`), which is enough for real certificate chains.  (Its body size limit is the origin's; see [`body-too-large`](#body-too-large).)  None of the origins has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
 
 ## Deployment
 
-Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leaving it as `common`; see [Origin environment](#origin-environment)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
+Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leaving it as `common`; see [Origin environment](#origin-environment)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
 
 ```
 ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.uri.path, "/ct/v1/add-pre-chain")
@@ -175,7 +177,7 @@ Keep **Normalize incoming URLs** turned on (under **Rules** > **Settings** > **U
 
 ### Limits
 
-Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code; [`cf_ctreq.js`](cf_ctreq.js) is about 27 KB.  Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and the slowest requests allowed by the 128 KiB body limit (such as one certificate with about 10,000 extensions, or a body with thousands of JSON keys) take about 2 ms in the `common` environment, which parses each certificate with both X.509 parsers.
+Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code; [`cf_ctreq.js`](cf_ctreq.js) is about 29 KB.  Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
 
 ## Monitoring rejections
 
@@ -257,7 +259,7 @@ Whichever environment is selected, one test also checks the differences between 
 
 ### Differential tests
 
-The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names and precertificate status as the origins do, but (like the snippet) don't verify signatures.  They require Go:
+The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names, precertificate status and body size as the origins do, but (like the snippet) don't verify signatures.  They require Go:
 
 ```
 npm run test:differential

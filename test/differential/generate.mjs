@@ -123,7 +123,10 @@ export function generate({ seed = 1, count = 5000 } = {}) {
   for (let id = 0; id < count; id++) {
     const r = rnd(10);
     const certs = r === 0 ? preIssuerChain() : r < 4 ? validChain() : chain();
-    items.push({ id: String(id), body: r === 1 ? JSON.stringify({ chain: certs.map(base64Variant) }) : body(certs) });
+    let text = r === 1 ? JSON.stringify({ chain: certs.map(base64Variant) }) : body(certs);
+    // Occasionally pad with whitespace to just within or just over an origin's body size limit.
+    if (rnd(100) === 0) text += " ".repeat(Math.max(0, pick([128 * 1024, 512000, 512 * 1024]) + rnd(2) - Buffer.byteLength(text)));
+    items.push({ id: String(id), body: text });
   }
   return items;
 }
