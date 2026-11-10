@@ -2,6 +2,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { tlv, seq, ctOid, OID_EKU, ext, POISON_EXT, makeCert, b64, makeCA, der, CERT, PRECERT, NONCRITICAL, ISSUER } from "./der.mjs";
 
 // CTREQ_ENVIRONMENT selects CONFIG.environment ("sunlight", "tesseract", "trillian", or "common")
 // for the snippet under test; by default, the snippet's own setting is tested. Another
@@ -20,54 +21,6 @@ const expected = (byEnvironment) => {
   assert.ok(Object.hasOwn(byEnvironment, ENVIRONMENT), `no expectation for environment ${ENVIRONMENT}`);
   return byEnvironment[ENVIRONMENT];
 };
-
-// Minimal DER builders; certificates are structurally valid X.509 but have fake signatures.
-const tlv = (tag, content) => {
-  const body = Buffer.from(content);
-  const n = body.length;
-  const header = n < 0x80 ? [tag, n] : n < 0x100 ? [tag, 0x81, n] : [tag, 0x82, n >> 8, n & 0xff];
-  return Buffer.concat([Buffer.from(header), body]);
-};
-const seq = (...parts) => tlv(0x30, Buffer.concat(parts));
-const ctOid = (last) => [0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, last]; // 1.3.6.1.4.1.11129.2.4.<last>
-const OID_EKU = [0x55, 0x1d, 0x25];
-const ext = (oid, critical, value) =>
-  seq(tlv(0x06, oid), critical ? tlv(0x01, [0xff]) : Buffer.alloc(0), tlv(0x04, value));
-const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
-
-// version is the content of the [0] version INTEGER (default v3), or null to omit it (v1);
-// versionField replaces the whole [0] field. beforeExtensions and afterExtensions are
-// raw bytes placed around the [3] extensions field, which extensionsField replaces.
-// outerAlgorithm replaces the signature algorithm after the TBSCertificate.
-function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], versionField, beforeExtensions = [], extensionsField, afterExtensions = [], outerAlgorithm } = {}) {
-  const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
-  const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
-  const time = tlv(0x17, Buffer.from("260101000000Z"));
-  const tbs = seq(
-    versionField ? Buffer.from(versionField) : version === null ? Buffer.alloc(0) : tlv(0xa0, tlv(0x02, version)),
-    tlv(0x02, [1]),
-    alg,
-    name("Test CA"),
-    seq(time, time),
-    name(subject),
-    seq(alg, tlv(0x03, [0, ...Array(32).fill(1)])),
-    Buffer.from(beforeExtensions),
-    extensionsField ? Buffer.from(extensionsField) : extensions ? tlv(0xa3, seq(...extensions)) : Buffer.alloc(0),
-    Buffer.from(afterExtensions),
-  );
-  return seq(tbs, outerAlgorithm ? Buffer.from(outerAlgorithm) : alg, tlv(0x03, [0, ...Array(64).fill(2)]));
-}
-
-const b64 = (buf) => buf.toString("base64");
-// A CA certificate whose subject matches the issuer of the other fixtures.
-const makeCA = (extensions) => makeCert({ extensions, subject: Buffer.from("Test CA") });
-// A valid outer SEQUENCE header around filler, for tests that don't need a parseable certificate.
-const der = (content) => tlv(0x30, content);
-
-const CERT = b64(makeCert());
-const PRECERT = b64(makeCert({ extensions: [POISON_EXT] }));
-const NONCRITICAL = b64(makeCert({ extensions: [ext(ctOid(3), false, [0x05, 0x00])] }));
-const ISSUER = b64(makeCA());
 
 // Requests whose body is streamed without a Content-Length (see postStream).
 const streamed = new WeakSet();

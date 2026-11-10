@@ -18,6 +18,7 @@
   - [Elastic](#elastic)
   - [Grafana](#grafana)
 - [Testing](#testing)
+  - [Differential tests](#differential-tests)
   - [Testing a deployed log](#testing-a-deployed-log)
 
 ## What is it?
@@ -253,6 +254,16 @@ CTREQ_ENVIRONMENT=sunlight npm test
 ```
 
 Whichever environment is selected, one test also checks the differences between all of them.
+
+### Differential tests
+
+The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names and precertificate status as the origins do, but (like the snippet) don't verify signatures.  They require Go:
+
+```
+npm run test:differential
+```
+
+`CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions.  They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request.
 
 ### Testing a deployed log
 
