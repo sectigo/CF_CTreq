@@ -61,6 +61,12 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 {"type":"https://github.com/sectigo/CF_CTreq#poison-invalid","title":"CT poison extension must be critical and contain NULL","status":400}
 ```
 
+When a particular chain entry is at fault (for `entry-not-base64`, `entry-too-short`, `entry-not-der`, `cert-unparseable` and `issuer-mismatch`), the object also has a `detail` that identifies it by its index in `chain`, e.g.:
+
+```json
+{"type":"https://github.com/sectigo/CF_CTreq#cert-unparseable","title":"chain entry cannot be parsed as an X.509 certificate","status":400,"detail":"chain[1] cannot be parsed as an X.509 certificate"}
+```
+
 In the `sunlight` and `common` environments, rejection responses (other than `405` ones, which Sunlight's router sends without it) also have an `Access-Control-Allow-Origin: *` header, as Sunlight's responses do, so that browser-based clients can read them.
 
 ### Rejection reasons
