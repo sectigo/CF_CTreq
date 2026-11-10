@@ -12,6 +12,8 @@ A large volume of malformed log API requests might overwhelm the origin's error 
 
 Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below are set in the `CONFIG` object at the top of [`cf_ctreq.js`](cf_ctreq.js).
 
+The body is interpreted as the target origin ([TesseraCT](https://github.com/transparency-dev/tesseract), which uses Go's `encoding/json` and `crypto/x509`) would interpret it, so that the snippet neither rejects a request that the origin would accept nor checks a different chain from the one the origin would use.  For example, the `Content-Type` is not checked, the `chain` key is matched regardless of the case of its letters, and line breaks in base64 are ignored.
+
 ### Rejection responses
 
 Every rejection response has an `X-CTreq-Reject` header containing a short reason code, so that rejections can be analysed in Cloudflare logs.  The body is a JSON [problem details](https://www.rfc-editor.org/rfc/rfc9457) object (`Content-Type: application/problem+json`) whose `type` is `https://github.com/sectigo/CF_CTreq#` followed by the reason code (so the URL leads to that reason's description below), whose `title` is a short description, and whose `status` repeats the HTTP status code, e.g.:
@@ -26,21 +28,21 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 `405 Method Not Allowed`, with an `Allow: POST` header, if the method is not `POST`.
 
-#### unsupported-media-type
-
-`415 Unsupported Media Type` if the `Content-Type` is not `application/json`.
-
 #### body-too-large
 
 `413 Content Too Large` if the `Content-Length` exceeds 128 KiB, which is checked before the body is read, or if the body itself turns out to exceed 128 KiB (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.
 
 #### invalid-json
 
-`400 Bad Request` if the body is not valid JSON.
+`400 Bad Request` if the body is not valid JSON (including when it starts with a byte order mark).
+
+#### chain-ambiguous
+
+`400 Bad Request` if the body has more than one key that matches `chain` regardless of case (e.g. both `chain` and `Chain`).  The origin would use whichever comes last, which the snippet cannot reliably determine.
 
 #### chain-missing
 
-`400 Bad Request` if `chain` is missing, is not an array, or is empty.
+`400 Bad Request` if `chain` (matched regardless of case) is missing, is not an array, or is empty.
 
 #### chain-too-long
 
@@ -48,7 +50,7 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 #### entry-not-base64
 
-`400 Bad Request` if any `chain` entry is not a string containing standard, padded base64.
+`400 Bad Request` if any `chain` entry is not a string containing standard, padded base64.  Line breaks (`\r` and `\n`) anywhere in the string are ignored.
 
 #### entry-too-short
 
@@ -56,11 +58,11 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 #### entry-not-der
 
-`400 Bad Request` if any `chain` entry does not start with a DER `SEQUENCE` tag (`0x30`), or its declared DER length does not match its decoded length.
+`400 Bad Request` if any `chain` entry does not start with a DER `SEQUENCE` tag (`0x30`), its DER length is not minimally encoded, or its declared DER length does not match its decoded length.
 
 #### cert-unparseable
 
-`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.
+`400 Bad Request` if any certificate in `chain` (not only the first) cannot be parsed as X.509 as far as its issuer and subject names and its extensions.  As in DER, every length must be minimally encoded, and an extension's `critical` flag, if present, must be `0x00` or `0xFF`.
 
 #### poison-invalid
 
@@ -104,7 +106,7 @@ Every rejection carries an [`X-CTreq-Reject`](#rejection-responses) response hea
 
 ### Cloudflare dashboard
 
-[Custom dashboards](https://developers.cloudflare.com/analytics/custom-dashboards/) can chart HTTP traffic for the log's hostname, with the status code and path as dimensions or filters.  Rejections appear there as `405`, `413`, `415` and `400` responses on the two endpoints.  That gives volumes and trends, but not the reason: most reasons share `400`, which the origin also uses for its own errors.
+[Custom dashboards](https://developers.cloudflare.com/analytics/custom-dashboards/) can chart HTTP traffic for the log's hostname, with the status code and path as dimensions or filters.  Rejections appear there as `405`, `413` and `400` responses on the two endpoints.  That gives volumes and trends, but not the reason: most reasons share `400`, which the origin also uses for its own errors.
 
 The reason is only available in logs.  For a per-reason breakdown, log the header (below) and either chart it in your log tool, or, if you have [Log Explorer](https://developers.cloudflare.com/log-explorer/) (which is being merged into Observability Logs), check whether its `http_requests` dataset contains the `ResponseHeaders` field.
 
