@@ -66,15 +66,17 @@ function originsFor(environment) {
   return ENVIRONMENTS[environment];
 }
 
-// OIDs in dotted form, as compared after decoding with oidString().
-const OID_CT_POISON = "1.3.6.1.4.1.11129.2.4.3";
-const OID_CT_PRECERT_SIGNING = "1.3.6.1.4.1.11129.2.4.4";
-const OID_EXT_KEY_USAGE = "2.5.29.37";
+// OIDs as keys from oidKey(), i.e. their minimal encodings (without tag and length).
+const OID_CT_POISON = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x03"; // 1.3.6.1.4.1.11129.2.4.3
+const OID_CT_PRECERT_SIGNING = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x04"; // 1.3.6.1.4.1.11129.2.4.4
+const OID_EXT_KEY_USAGE = "\x55\x1d\x25"; // 2.5.29.37
 const NULL_VALUE = "\x05\x00";
 
 // Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient. Go's
 // decoder also skips CR and LF anywhere, so those are removed before testing this.
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+// With a length that is a multiple of 4, this is equivalent to
+// /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, but faster.
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const LINE_BREAKS = /[\r\n]/g;
 // Go's encoding/json matches keys to struct fields case-insensitively. The /i flag
 // without /u folds ASCII letters only, which is all that Go folds onto "chain".
@@ -90,33 +92,42 @@ function lastChainKey(text) {
   let last;
   let depth = 0;
   for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
+    const c = text.charCodeAt(i);
+    if (c === 0x22) {
+      // Skip to the closing quote: the next one not escaped by an odd number of
+      // backslashes.
       const start = i;
-      for (i++; text[i] !== '"'; i++) {
-        if (text[i] === "\\") {
-          i++;
+      let escaped;
+      do {
+        i = text.indexOf('"', i + 1);
+        let backslash = i;
+        while (text.charCodeAt(backslash - 1) === 0x5c) {
+          backslash--;
         }
-      }
+        escaped = (i - backslash) % 2 === 1;
+      } while (escaped);
       let next = i + 1;
       while (JSON_WHITESPACE.includes(text[next])) {
         next++;
       }
-      // A string at depth 1 followed by a colon is a top-level key.
+      // A string at depth 1 followed by a colon is a top-level key. Only one with an
+      // escape needs decoding.
       if (depth === 1 && text[next] === ":") {
-        const key = JSON.parse(text.slice(start, i + 1));
+        const raw = text.slice(start + 1, i);
+        const key = raw.includes("\\") ? JSON.parse(text.slice(start, i + 1)) : raw;
         if (CHAIN_KEY.test(key)) {
           last = key;
         }
       }
-    } else if (c === "{" || c === "[") {
-      depth++;
-    } else if (c === "}" || c === "]") {
-      depth--;
+    } else if (c === 0x7b || c === 0x5b) {
+      depth++; // { or [
+    } else if (c === 0x7d || c === 0x5d) {
+      depth--; // } or ]
     }
   }
   return last;
 }
+
 
 // Decodes the DER TLV header at index i of a binary string. Returns null if the
 // header is malformed (including a length that is not minimally encoded, which Go's
@@ -217,22 +228,30 @@ function derChildren(data, parent) {
   return children;
 }
 
-// Decodes the contents of an OBJECT IDENTIFIER (as a binary string) into its dotted
-// form, or returns null if the origin's X.509 parser would reject it. Both parsers
+// Returns a key for the OBJECT IDENTIFIER whose contents are at [start, end) of a
+// binary string, or null if the origin's X.509 parser would reject it. Both parsers
 // reject an arc that is truncated, longer than 5 bytes, or 2^31 or more, but only Go's
 // crypto/x509 rejects an empty OID or an arc that isn't minimally encoded (with a
 // leading 0x80 byte): certificate-transparency-go's x509 reads such an arc as the
-// same number, so e.g. a poison extension's OID needn't be encoded canonically.
-function oidString(contents, origin) {
-  if (contents.length === 0) {
+// same number, so e.g. a poison extension's OID needn't be encoded canonically. The
+// key is the OID's minimal encoding (without any leading 0x80 bytes), so that two
+// OIDs have the same key exactly when they have the same arcs.
+function oidKey(der, start, end, origin) {
+  if (start === end) {
     return origin.x509 === "go" ? null : "";
   }
-  const arcs = [];
+  let padded = false;
   let value = 0;
   let length = 0;
-  for (let i = 0; i < contents.length; i++) {
-    const byte = contents.charCodeAt(i);
-    if ((length === 0 && byte === 0x80 && origin.x509 === "go") || ++length > 5) {
+  for (let i = start; i < end; i++) {
+    const byte = der.charCodeAt(i);
+    if (length === 0 && byte === 0x80) {
+      if (origin.x509 === "go") {
+        return null;
+      }
+      padded = true;
+    }
+    if (++length > 5) {
       return null;
     }
     value = value * 128 + (byte & 0x7f);
@@ -240,7 +259,6 @@ function oidString(contents, origin) {
       if (value > 0x7fffffff) {
         return null;
       }
-      arcs.push(value);
       value = 0;
       length = 0;
     }
@@ -248,23 +266,36 @@ function oidString(contents, origin) {
   if (length !== 0) {
     return null; // Truncated.
   }
-  // The first arc encodes the first two arcs (40 * first + second), the first being
-  // 0, 1 or 2.
-  const [both, ...rest] = arcs;
-  return [both < 80 ? Math.floor(both / 40) : 2, both < 80 ? both % 40 : both - 80, ...rest].join(".");
+  if (!padded) {
+    return der.slice(start, end);
+  }
+  let key = "";
+  let arcStart = true;
+  for (let i = start; i < end; i++) {
+    const byte = der.charCodeAt(i);
+    if (!(arcStart && byte === 0x80)) {
+      key += der[i];
+      arcStart = byte < 0x80;
+    }
+  }
+  return key;
 }
 
-// Parses the SEQUENCE of extensions inside a certificate's [3] wrapper into
-// { oid, critical, value } entries (oid is in dotted form; value is the DER location
-// of the extnValue contents), or returns null if they are malformed, as the origin's
-// X.509 parser would. Only Go's crypto/x509 rejects two extensions of the same type.
+// Parses the SEQUENCE of extensions inside a certificate's [3] wrapper, returning
+// { oid, critical, value } entries (oid is a key from oidKey(); value is the DER location
+// of the extnValue contents) for the extensions that this snippet checks (CT poison and
+// extended key usage), in their order in the certificate, or null if any extension is
+// malformed, as the origin's X.509 parser would. Only Go's crypto/x509 rejects two
+// extensions of the same type.
 function certExtensions(cert, list, origin) {
-  const entries = derChildren(cert, list);
-  if (entries === null) {
-    return null;
-  }
   const extensions = [];
-  for (const entry of entries) {
+  const seen = origin.x509 === "go" ? new Set() : null;
+  for (let at = list.offset; at < list.end; ) {
+    const entry = derDecode(cert, at, list.end);
+    if (entry === null) {
+      return null;
+    }
+    at = entry.end;
     // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }
     // As for both X.509 parsers, anything after extnValue is ignored.
     const oid = entry.tag === 0x30 ? derDecode(cert, entry.offset, entry.end) : null;
@@ -284,11 +315,14 @@ function certExtensions(cert, list, origin) {
       i = flag.end;
     }
     const value = derDecode(cert, i, entry.end);
-    const id = oidString(cert.slice(oid.offset, oid.end), origin);
-    if (id === null || value === null || value.tag !== 0x04 || (origin.x509 === "go" && extensions.some((e) => e.oid === id))) {
+    const id = oidKey(cert, oid.offset, oid.end, origin);
+    if (id === null || value === null || value.tag !== 0x04 || seen?.has(id)) {
       return null;
     }
-    extensions.push({ oid: id, critical, value });
+    seen?.add(id);
+    if (id === OID_CT_POISON || id === OID_EXT_KEY_USAGE) {
+      extensions.push({ oid: id, critical, value });
+    }
   }
   return extensions;
 }
@@ -423,7 +457,7 @@ function isPrecertSigningCert({ der, extensions }, origin) {
     }
     const list = derDecode(der, e.value.offset, e.value.end);
     const oids = list !== null && list.tag === 0x30 && list.end === e.value.end ? derChildren(der, list) : null;
-    const ids = oids?.map((o) => (o.tag === 0x06 ? oidString(der.slice(o.offset, o.end), origin) : null));
+    const ids = oids?.map((o) => (o.tag === 0x06 ? oidKey(der, o.offset, o.end, origin) : null));
     return ids !== undefined && !ids.includes(null) && ids.includes(OID_CT_PRECERT_SIGNING);
   });
 }
@@ -431,17 +465,25 @@ function isPrecertSigningCert({ der, extensions }, origin) {
 // A rejection, as the arguments of errorResponse().
 const rejection = (reason, message, status = 400, headers = {}) => ({ reason, message, status, headers });
 
-// Returns the rejection, if any, that the origin would make for a chain of DER
-// certificates (each already known to be a DER SEQUENCE), or null if it would accept
-// it as far as this snippet checks.
-function chainRejection(origin, ders, isPreChainAPI) {
+// Parses a chain of DER certificates (each already known to be a DER SEQUENCE) as the
+// origin's X.509 parser would, or returns null if it would reject any of them.
+function parseChain(ders, origin) {
   const certs = [];
   for (const der of ders) {
     const parsed = parseCert(der, origin);
     if (parsed === null) {
-      return rejection("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate");
+      return null;
     }
     certs.push(parsed);
+  }
+  return certs;
+}
+
+// Returns the rejection, if any, that the origin would make for a chain parsed by
+// parseChain(), or null if it would accept it as far as this snippet checks.
+function chainRejection(origin, certs, isPreChainAPI) {
+  if (certs === null) {
+    return rejection("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate");
   }
 
   const { der: firstDer, extensions } = certs[0];
@@ -553,8 +595,13 @@ function bodyRejectionOrChain(body) {
   }
   // As in Go, if there's more than one chain key (differing only in case), the last is
   // used. (Go also rejects the request if an earlier one isn't a valid chain, but the
-  // snippet doesn't check those.)
-  const chainKey = json !== null && typeof json === "object" && !Array.isArray(json) ? lastChainKey(text) : undefined;
+  // snippet doesn't check those.) The text only needs scanning for the last one if
+  // there are keys with different cases, as JSON.parse keeps the last value of each.
+  let chainKey;
+  if (json !== null && typeof json === "object" && !Array.isArray(json)) {
+    const chainKeys = Object.keys(json).filter((k) => k.length === 5 && CHAIN_KEY.test(k));
+    chainKey = chainKeys.length > 1 ? lastChainKey(text) : chainKeys[0];
+  }
   const chain = chainKey === undefined ? undefined : json[chainKey];
   if (!Array.isArray(chain) || chain.length === 0) {
     return rejection("chain-missing", "chain is missing or empty");
@@ -564,8 +611,11 @@ function bodyRejectionOrChain(body) {
   }
   const ders = [];
   for (const entry of chain) {
-    const base64 = typeof entry === "string" ? entry.replace(LINE_BREAKS, "") : null;
-    if (base64 === null || !BASE64.test(base64)) {
+    let base64 = typeof entry === "string" ? entry : null;
+    if (base64 !== null && (base64.includes("\n") || base64.includes("\r"))) {
+      base64 = base64.replace(LINE_BREAKS, "");
+    }
+    if (base64 === null || base64.length % 4 !== 0 || !BASE64.test(base64)) {
       return rejection("entry-not-base64", "chain entries must be base64 strings");
     }
     // atob() returns a "binary string" (one char per byte).
@@ -612,8 +662,15 @@ export default {
       return errorResponse(ders, origins);
     }
     // Only reject if every origin in the environment would reject, reporting
-    // TesseraCT's reason if it is one of them (else the first origin's).
-    const rejections = origins.map((origin) => chainRejection(origin, ders, isPreChainAPI));
+    // TesseraCT's reason if it is one of them (else the first origin's). Origins with
+    // the same X.509 parser share the parsed chain.
+    const parsed = new Map();
+    const rejections = origins.map((origin) => {
+      if (!parsed.has(origin.x509)) {
+        parsed.set(origin.x509, parseChain(ders, origin));
+      }
+      return chainRejection(origin, parsed.get(origin.x509), isPreChainAPI);
+    });
     if (rejections.every((r) => r !== null)) {
       return errorResponse(rejections[Math.max(0, origins.indexOf(ORIGINS.tesseract))], origins);
     }
