@@ -86,90 +86,109 @@ function derChildren(data, parent) {
   return children;
 }
 
-// Decodes the fields of an X.509 TBSCertificate, or returns null if it is malformed.
-function tbsFields(cert) {
-  const root = derDecode(cert, 0);
-  const tbs = root && derDecode(cert, root.offset, root.end);
-  return tbs && tbs.tag === 0x30 ? derChildren(cert, tbs) : null;
-}
-
-// Returns the DER encodings (including headers) of the issuer and subject names
-// given the TBSCertificate fields, or null if they are not as expected.
-function certNames(cert, fields) {
-  const i = fields[0]?.tag === 0xa0 ? 1 : 0; // Skip the optional [0] version.
-  const issuer = fields[i + 2]; // After serialNumber and signature.
-  const subject = fields[i + 4]; // After validity.
-  if (issuer?.tag !== 0x30 || subject?.tag !== 0x30) {
-    return null;
-  }
-  return {
-    issuer: cert.slice(issuer.start, issuer.end),
-    subject: cert.slice(subject.start, subject.end),
-  };
-}
-
-// Parses the extensions of an X.509 certificate into { oid, critical, value } entries
-// (value is the DER location of the extnValue contents). Returns [] if the certificate
-// has no extensions, or null if they are malformed.
-function certExtensions(cert, fields) {
-  const wrapper = fields.find((f) => f.tag === 0xa3); // [3] EXPLICIT Extensions
-  if (wrapper === undefined) {
-    return [];
-  }
+// Parses the extensions inside the [3] wrapper of a v3 certificate into
+// { oid, critical, value } entries (value is the DER location of the extnValue
+// contents), or returns null if they are malformed, as Go's crypto/x509 would.
+function certExtensions(cert, wrapper) {
+  // As in Go, anything after the SEQUENCE inside [3] is ignored.
   const list = derDecode(cert, wrapper.offset, wrapper.end);
-  const entries = list !== null && list.tag === 0x30 && list.end === wrapper.end ? derChildren(cert, list) : null;
+  const entries = list !== null && list.tag === 0x30 ? derChildren(cert, list) : null;
   if (entries === null) {
     return null;
   }
   const extensions = [];
   for (const entry of entries) {
     // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }
-    const parts = entry.tag === 0x30 ? derChildren(cert, entry) : null;
-    if (parts === null || parts.length < 2 || parts.length > 3 || parts[0].tag !== 0x06 || parts.at(-1).tag !== 0x04) {
+    // As in Go, anything after extnValue is ignored.
+    const oid = entry.tag === 0x30 ? derDecode(cert, entry.offset, entry.end) : null;
+    if (oid === null || oid.tag !== 0x06) {
       return null;
     }
-    // Go's crypto/x509 only accepts 0x00 (FALSE) and 0xFF (TRUE).
-    const flag = parts.length === 3 ? cert.charCodeAt(parts[1].offset) : 0;
-    if (parts.length === 3 && (parts[1].tag !== 0x01 || parts[1].length !== 1 || (flag !== 0x00 && flag !== 0xff))) {
+    let critical = false;
+    let i = oid.end;
+    if (i < entry.end && cert.charCodeAt(i) === 0x01) {
+      // Go's crypto/x509 only accepts 0x00 (FALSE) and 0xFF (TRUE).
+      const flag = derDecode(cert, i, entry.end);
+      const byte = flag?.length === 1 ? cert.charCodeAt(flag.offset) : -1;
+      if (byte !== 0x00 && byte !== 0xff) {
+        return null;
+      }
+      critical = byte === 0xff;
+      i = flag.end;
+    }
+    const value = derDecode(cert, i, entry.end);
+    const id = cert.slice(oid.offset, oid.end);
+    // Go rejects a certificate with more than one extension of the same type.
+    if (value === null || value.tag !== 0x04 || extensions.some((e) => e.oid === id)) {
       return null;
     }
-    extensions.push({
-      oid: cert.slice(parts[0].offset, parts[0].end),
-      critical: flag === 0xff,
-      value: parts.at(-1),
-    });
+    extensions.push({ oid: id, critical, value });
   }
   return extensions;
 }
 
-// Returns the X.509 version number (0 for v1, 1 for v2, 2 for v3) given the
-// TBSCertificate fields, or null if it is malformed or unknown, as Go's crypto/x509
-// requires: [0] EXPLICIT INTEGER DEFAULT v1, which may also be encoded explicitly.
-function certVersion(cert, fields) {
-  const wrapper = fields[0];
-  if (wrapper?.tag !== 0xa0) {
-    return 0;
-  }
-  const version = derDecode(cert, wrapper.offset, wrapper.end);
-  if (version === null || version.tag !== 0x02 || version.length !== 1 || version.end !== wrapper.end) {
-    return null;
-  }
-  const value = cert.charCodeAt(version.offset);
-  return value <= 2 ? value : null;
-}
-
-// Parses a certificate into { der, issuer, subject, extensions }, or returns null if
-// it is not a well-formed X.509 certificate as far as its extensions. As in Go's
-// crypto/x509, extensions in v1 and v2 certificates are ignored.
+// Parses a certificate into { der, issuer, subject, extensions } (the names being DER
+// encodings including headers), or returns null if it is malformed. The TBSCertificate
+// is read field by field as Go's crypto/x509 reads it, as far as the extensions: the
+// optional unique IDs are only read from v2 and v3 certificates, extensions only from
+// v3 certificates and only where Go looks for them, and anything after that is ignored.
 function parseCert(der) {
-  const fields = tbsFields(der);
-  if (fields === null) {
+  const root = derDecode(der, 0);
+  const tbs = root && derDecode(der, root.offset, root.end);
+  if (tbs === null || tbs.tag !== 0x30) {
     return null;
   }
-  const version = certVersion(der, fields);
-  const names = certNames(der, fields);
-  const extensions = version === 2 ? certExtensions(der, fields) : [];
-  return version === null || names === null || extensions === null ? null : { der, ...names, extensions };
+  let i = tbs.offset;
+  const peek = (tag) => i < tbs.end && der.charCodeAt(i) === tag;
+  // Returns the next field and moves past it, or returns null if it is malformed or
+  // doesn't have the given tag.
+  const read = (tag) => {
+    const field = peek(tag) ? derDecode(der, i, tbs.end) : null;
+    if (field !== null) {
+      i = field.end;
+    }
+    return field;
+  };
+
+  // version [0] EXPLICIT INTEGER DEFAULT v1 (0), which may also be encoded explicitly.
+  let version = 0;
+  if (peek(0xa0)) {
+    const wrapper = read(0xa0);
+    const integer = wrapper && derDecode(der, wrapper.offset, wrapper.end);
+    if (integer === null || integer.tag !== 0x02 || integer.length !== 1 || integer.end !== wrapper.end) {
+      return null;
+    }
+    version = der.charCodeAt(integer.offset);
+    if (version > 2) {
+      return null; // Unknown (v4 or later) or negative.
+    }
+  }
+  // serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo.
+  const fields = [0x02, 0x30, 0x30, 0x30, 0x30, 0x30].map(read);
+  if (fields.includes(null)) {
+    return null;
+  }
+  const [, , issuer, , subject] = fields;
+  let extensions = [];
+  if (version >= 1) {
+    // issuerUniqueID [1] and subjectUniqueID [2], both IMPLICIT and optional.
+    if ((peek(0x81) && read(0x81) === null) || (peek(0x82) && read(0x82) === null)) {
+      return null;
+    }
+    if (version === 2 && peek(0xa3)) {
+      const wrapper = read(0xa3);
+      extensions = wrapper && certExtensions(der, wrapper);
+      if (extensions === null) {
+        return null;
+      }
+    }
+  }
+  return {
+    der,
+    issuer: der.slice(issuer.start, issuer.end),
+    subject: der.slice(subject.start, subject.end),
+    extensions,
+  };
 }
 
 // Reads the request body as bytes, or returns null as soon as it exceeds maxBytes, so that
