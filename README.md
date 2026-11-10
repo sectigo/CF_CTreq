@@ -1,5 +1,25 @@
 # CF_CTreq
 
+## Contents
+
+- [What is it?](#what-is-it)
+- [Why is it needed?](#why-is-it-needed)
+- [How does it work?](#how-does-it-work)
+  - [Origin environment](#origin-environment)
+  - [Rejection responses](#rejection-responses)
+  - [Rejection reasons](#rejection-reasons)
+    - [`method-not-allowed`](#method-not-allowed), [`body-too-large`](#body-too-large), [`invalid-json`](#invalid-json), [`chain-missing`](#chain-missing), [`chain-too-long`](#chain-too-long), [`entry-not-base64`](#entry-not-base64), [`entry-too-short`](#entry-too-short), [`entry-not-der`](#entry-not-der), [`cert-unparseable`](#cert-unparseable), [`poison-invalid`](#poison-invalid), [`precert-on-add-chain`](#precert-on-add-chain), [`cert-on-add-pre-chain`](#cert-on-add-pre-chain), [`psc-not-supported`](#psc-not-supported), [`issuer-mismatch`](#issuer-mismatch)
+  - [Checks that are not done](#checks-that-are-not-done)
+- [Deployment](#deployment)
+  - [Limits](#limits)
+- [Monitoring rejections](#monitoring-rejections)
+  - [Cloudflare dashboard](#cloudflare-dashboard)
+  - [Logging the header](#logging-the-header)
+  - [Elastic](#elastic)
+  - [Grafana](#grafana)
+- [Testing](#testing)
+  - [Testing a deployed log](#testing-a-deployed-log)
+
 ## What is it?
 
 CF_CTreq is a preprocessor for Certificate Transparency (CT) log API requests (RFC6962 and Static CT), implemented in JavaScript as a [Cloudflare Snippet](https://developers.cloudflare.com/rules/snippets/).
