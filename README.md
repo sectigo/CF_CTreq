@@ -80,7 +80,19 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 
 `400 Bad Request` if a certificate in `chain` has an issuer name that is not byte-identical to the subject name of the next certificate in `chain`.  Signatures are not verified.
 
-Further checks may be added in the future.
+### Checks that are not done
+
+As far as possible, the snippet aims to only reject requests that the origin would also reject, so that it never stops a submission from being logged.  Further checks may be added in the future, but the following checks are deliberately not done:
+
+- **`Content-Type`**: RFC 6962 doesn't require a particular `Content-Type`, and the origin doesn't check it, so a client that omits it or sends e.g. `text/plain` must still succeed.
+- **Signatures, and chaining to an accepted root**: verifying signatures needs the public key algorithms and the log's root list, and is the most expensive part of chain validation, so it is left to the origin.  `issuer-mismatch` only compares names.
+- **The log's acceptance policy**: TesseraCT can be configured to reject certificates by expiry date (`not_after_start`, `not_after_limit`, `reject_expired`, `reject_unexpired`), extended key usage, extension, intermediate, or SHA-1 signature.  Repeating these checks would duplicate each log's configuration in the snippet, where it could drift out of sync.
+- **Precertificate Signing Certificate as the issuer on `add-chain`**: RFC 6962 says that a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`) can only sign precertificates, so a certificate that one has issued is misissued.  But TesseraCT's chain verification ([`lax509`](https://github.com/transparency-dev/tesseract/blob/main/internal/lax509/README.md)) deliberately skips extended key usage checks, so that misissued certificates can be logged and thereby discovered.
+- **Embedded SCT list in a precertificate**: a precertificate with an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`) makes little sense, but TesseraCT doesn't reject one.
+- **Extensions in v1 and v2 certificates**: X.509 only defines extensions for v3, and Go's `crypto/x509` ignores any in a v1 or v2 certificate, so the snippet does too.  A v1 certificate containing a CT Poison extension is therefore treated as a certificate, not a precertificate.
+- **Certificate fields other than the names and extensions**: the serial number, validity, public key and signature are not parsed.  Parsing them would add code for little benefit, because the origin rejects a certificate that it can't parse.
+
+The snippet is stricter than the origin's defaults in one respect: TesseraCT accepts a body of up to 512 KiB and any number of chain entries, whereas the snippet's `CONFIG` limits are 128 KiB (`body-too-large`) and 10 entries (`chain-too-long`), which are enough for real certificate chains.
 
 ## Deployment
 
