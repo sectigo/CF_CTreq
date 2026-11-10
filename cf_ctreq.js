@@ -25,13 +25,27 @@
 //   the next certificate in the chain. Signatures are not verified.
 // CONFIG.environment selects whose criteria apply: "sunlight", "tesseract", or
 // "trillian" rejects what that origin would reject, and "common" only rejects what
-// all of them would reject.
+// all of them would reject. CONFIG.logEnvironments can select a different one for
+// particular logs, identified by their hostnames and paths.
 // Requests that pass these checks are forwarded to the origin unchanged.
 
 const CONFIG = {
-  // "sunlight", "tesseract", "trillian", or "common" (only reject what all of them
-  // would reject).
+  // Default environment: "sunlight", "tesseract", "trillian", or "common" (only
+  // reject what all of them would reject).
   environment: "common",
+  // Environments for particular logs, as [regular expression, environment] pairs: a
+  // request uses the environment of the first pair whose regular expression matches
+  // its hostname followed by its path (e.g. "tiger2027h1.ct.sectigo.com/ct/v1/add-chain"),
+  // or else the default environment.
+  logEnvironments: [
+    // Sectigo Static CT logs.
+    [/^(monument|statue)\d{4}h[12]\.sub\.ct\.sectigo\.com\//, "tesseract"],
+    [/^billboard\.sub\.ct\.sectigo\.com\//, "tesseract"],
+    [/^standee\.sub\.ctlabs\.sectigo\.com\//, "tesseract"],
+    // Sectigo RFC 6962 logs.
+    [/^(elephant|tiger)\d{4}h[12]\.ct\.sectigo\.com\//, "trillian"],
+    [/^(dumbo|tigger\d{4})\.ctlabs\.sectigo\.com\//, "trillian"],
+  ],
   // Maximum request body size in bytes, or null for the largest of the environment's
   // origins' defaults. Set it if the origin is configured with a different limit.
   maxBodyBytes: null,
@@ -62,15 +76,35 @@ const ENVIRONMENTS = {
   trillian: [ORIGINS.trillian],
   common: Object.values(ORIGINS),
 };
-// Fail at deployment, rather than on every request, if CONFIG.environment is wrong.
-originsFor(CONFIG.environment);
+// Resolved when the snippet is loaded, so that a wrong environment fails at
+// deployment rather than on every request.
+const DEFAULT_ORIGINS = originsFor(CONFIG.environment, "CONFIG.environment");
+const LOG_ORIGINS = CONFIG.logEnvironments.map((pair, i) => {
+  const setting = `CONFIG.logEnvironments[${i}]`;
+  if (!Array.isArray(pair) || pair.length !== 2 || !(pair[0] instanceof RegExp)) {
+    throw new Error(`${setting} must be a [regular expression, environment] pair`);
+  }
+  return [pair[0], originsFor(pair[1], `${setting}'s environment`)];
+});
 
-function originsFor(environment) {
+function originsFor(environment, setting) {
   if (!Object.hasOwn(ENVIRONMENTS, environment)) {
     const names = Object.keys(ENVIRONMENTS).map((e) => JSON.stringify(e));
-    throw new Error(`CONFIG.environment must be ${names.slice(0, -1).join(", ")}, or ${names.at(-1)}, not ${JSON.stringify(environment)}`);
+    throw new Error(`${setting} must be ${names.slice(0, -1).join(", ")}, or ${names.at(-1)}, not ${JSON.stringify(environment)}`);
   }
   return ENVIRONMENTS[environment];
+}
+
+// Returns the origins of the environment for a request's URL.
+function originsForLog(url) {
+  const log = url.hostname + url.pathname;
+  for (const [pattern, origins] of LOG_ORIGINS) {
+    // search() ignores lastIndex, so a pattern with the g or y flag matches every time.
+    if (log.search(pattern) !== -1) {
+      return origins;
+    }
+  }
+  return DEFAULT_ORIGINS;
 }
 
 // OIDs as keys from oidKey(), i.e. their minimal encodings (without tag and length).
@@ -651,8 +685,9 @@ function bodyRejectionOrChain(body) {
 
 export default {
   async fetch(request) {
-    const origins = originsFor(CONFIG.environment);
-    const isPreChainAPI = isPreChainPath(new URL(request.url).pathname);
+    const url = new URL(request.url);
+    const origins = originsForLog(url);
+    const isPreChainAPI = isPreChainPath(url.pathname);
     if (isPreChainAPI === null) {
       return fetch(request);
     }

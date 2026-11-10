@@ -59,6 +59,17 @@ The origins differ slightly in what they reject, so `CONFIG.environment` selects
 | `sunlight` | What [Sunlight](https://github.com/FiloSottile/sunlight) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 | `trillian` | What the [Trillian](https://github.com/google/certificate-transparency-go/tree/master/trillian) CT front end (CTFE) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 
+If one Snippet serves several logs that run different software, `CONFIG.logEnvironments` selects the environment for each log: it is a list of `[regular expression, environment]` pairs, and a request uses the environment of the first pair whose regular expression matches its hostname followed by its path (e.g. `tiger2027h1.ct.sectigo.com/ct/v1/add-chain`), or else `CONFIG.environment`.  So a log can be identified by its hostname or by a path prefix, e.g.:
+
+```js
+logEnvironments: [
+  [/^(tiger|elephant)\d{4}h[12]\.ct\.example\.com\//, "trillian"],
+  [/^ct\.example\.com\/2027h1\//, "sunlight"],
+],
+```
+
+It lists Sectigo's [logs](https://github.com/sectigo/CTLogs) by default (TesseraCT for Monument, Statue, Billboard and Standee, and Trillian for Elephant, Tiger, Dumbo and Tigger), which doesn't affect other logs.  A misspelt environment, here or in `CONFIG.environment`, makes the Snippet fail as soon as it is deployed.
+
 All the origins parse the request body in the same way, but they differ as follows, so these checks depend on the environment:
 
 | Request | TesseraCT | Sunlight | Trillian | `common` |
@@ -165,7 +176,7 @@ The snippet's limit on the number of chain entries is stricter than the origins'
 
 ## Deployment
 
-Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leaving it as `common`; see [Origin environment](#origin-environment)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
+Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leaving it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software (see [Origin environment](#origin-environment)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
 
 ```
 ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.uri.path, "/ct/v1/add-pre-chain")
@@ -177,7 +188,7 @@ Keep **Normalize incoming URLs** turned on (under **Rules** > **Settings** > **U
 
 ### Limits
 
-Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code; [`cf_ctreq.js`](cf_ctreq.js) is about 29 KB.  Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
+Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code; [`cf_ctreq.js`](cf_ctreq.js) is about 31 KB.  Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
 
 ## Monitoring rejections
 
