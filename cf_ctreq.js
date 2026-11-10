@@ -15,13 +15,10 @@
 // actual length (else 400).
 //
 // Every certificate must then parse as X.509 down to its extensions (RFC 5280),
-// else 400, and:
+// else 400, and (as for the origin, extensions are only read from v3 certificates):
 // - If the first certificate has the CT poison extension (RFC 6962 section 3.1) it
 //   must be critical with a NULL value, and only add-pre-chain is permitted.
 //   If it does not, only add-chain is permitted.
-// - A poisoned certificate must not also contain an embedded SCT list.
-// - On add-chain, the second certificate must not be a Precertificate Signing
-//   Certificate (RFC 6962 section 3.1), which can only sign precertificates.
 // - Each certificate's issuer name must be byte-identical to the subject name of
 //   the next certificate in the chain. Signatures are not verified.
 // Requests that pass these checks are forwarded to the origin unchanged.
@@ -36,9 +33,6 @@ const CONFIG = {
 
 // OID contents (without tag and length) as binary strings.
 const OID_CT_POISON = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x03"; // 1.3.6.1.4.1.11129.2.4.3
-const OID_CT_SCT_LIST = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x02"; // 1.3.6.1.4.1.11129.2.4.2
-const OID_CT_PRECERT_SIGNING = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x04"; // 1.3.6.1.4.1.11129.2.4.4
-const OID_EXT_KEY_USAGE = "\x55\x1d\x25"; // 2.5.29.37
 const NULL_VALUE = "\x05\x00";
 
 // Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient. Go's
@@ -151,26 +145,34 @@ function certExtensions(cert, fields) {
   return extensions;
 }
 
+// Returns the X.509 version number (0 for v1, 1 for v2, 2 for v3) given the
+// TBSCertificate fields, or null if it is malformed or unknown, as Go's crypto/x509
+// requires: [0] EXPLICIT INTEGER DEFAULT v1, which may also be encoded explicitly.
+function certVersion(cert, fields) {
+  const wrapper = fields[0];
+  if (wrapper?.tag !== 0xa0) {
+    return 0;
+  }
+  const version = derDecode(cert, wrapper.offset, wrapper.end);
+  if (version === null || version.tag !== 0x02 || version.length !== 1 || version.end !== wrapper.end) {
+    return null;
+  }
+  const value = cert.charCodeAt(version.offset);
+  return value <= 2 ? value : null;
+}
+
 // Parses a certificate into { der, issuer, subject, extensions }, or returns null if
-// it is not a well-formed X.509 certificate as far as its extensions.
+// it is not a well-formed X.509 certificate as far as its extensions. As in Go's
+// crypto/x509, extensions in v1 and v2 certificates are ignored.
 function parseCert(der) {
   const fields = tbsFields(der);
   if (fields === null) {
     return null;
   }
+  const version = certVersion(der, fields);
   const names = certNames(der, fields);
-  const extensions = certExtensions(der, fields);
-  return names === null || extensions === null ? null : { der, ...names, extensions };
-}
-
-function isPrecertSigningCert({ der, extensions }) {
-  const eku = extensions.find((e) => e.oid === OID_EXT_KEY_USAGE);
-  if (eku === undefined) {
-    return false;
-  }
-  const list = derDecode(der, eku.value.offset, eku.value.end);
-  const oids = list !== null && list.tag === 0x30 ? derChildren(der, list) : null;
-  return oids !== null && oids.some((o) => o.tag === 0x06 && der.slice(o.offset, o.end) === OID_CT_PRECERT_SIGNING);
+  const extensions = version === 2 ? certExtensions(der, fields) : [];
+  return version === null || names === null || extensions === null ? null : { der, ...names, extensions };
 }
 
 // Reads the request body as bytes, or returns null as soon as it exceeds maxBytes, so that
@@ -283,9 +285,6 @@ export default {
       if (!poison.critical || firstDer.slice(poison.value.offset, poison.value.end) !== NULL_VALUE) {
         return errorResponse("poison-invalid", "CT poison extension must be critical and contain NULL");
       }
-      if (extensions.some((e) => e.oid === OID_CT_SCT_LIST)) {
-        return errorResponse("poison-with-sct-list", "precertificate must not contain an embedded SCT list");
-      }
     }
     const hasPoison = poison !== undefined;
     if (hasPoison && !isPreChainAPI) {
@@ -293,9 +292,6 @@ export default {
     }
     if (!hasPoison && isPreChainAPI) {
       return errorResponse("cert-on-add-pre-chain", "certificate submitted to add-pre-chain; use add-chain");
-    }
-    if (!isPreChainAPI && certs.length > 1 && isPrecertSigningCert(certs[1])) {
-      return errorResponse("psc-on-add-chain", "precertificate signing certificate submitted as the issuer to add-chain");
     }
     for (let i = 0; i + 1 < certs.length; i++) {
       if (certs[i].issuer !== certs[i + 1].subject) {
