@@ -31,6 +31,8 @@ const streamed = new WeakSet();
 // rejects are also sent to that deployed log, which must reject them identically. Anything the
 // snippet would forward is skipped, so nothing is ever submitted to the log.
 const networkFetch = globalThis.fetch;
+// The snippet without that, for tests of requests to other logs than the deployed one.
+const localSnippet = { fetch: snippet.fetch.bind(snippet) };
 if (process.env.CTREQ_LOG_URL) {
   const base = new URL(process.env.CTREQ_LOG_URL);
   let liveTest;
@@ -658,7 +660,8 @@ test("CONFIG.logEnvironments selects the environment by hostname and path", asyn
     }
   };
   // Sectigo's logs, whatever CONFIG.environment is; anything else uses CONFIG.environment.
-  await check(snippet, {
+  // These requests are for many logs, so they're never sent to a deployed one.
+  await check(localSnippet, {
     "https://tiger2027h1.ct.sectigo.com/": "trillian",
     "https://elephant2026h2.ct.sectigo.com/": "trillian",
     "https://dumbo.ctlabs.sectigo.com/": "trillian",

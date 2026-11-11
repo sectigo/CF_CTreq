@@ -296,10 +296,10 @@ If any of these fails, the workflow opens an issue.  After reviewing upstream ch
 
 ### Testing a deployed log
 
-To check a deployed snippet end to end, set `CTREQ_LOG_URL` to the log's base URL (including any path prefix such as a shard name), and `CTREQ_ENVIRONMENT` to the deployed snippet's environment if it differs from that of the local `cf_ctreq.js`:
+To check a deployed snippet end to end, set `CTREQ_LOG_URL` to the log's base URL (including any path prefix such as a shard name), and `CTREQ_ENVIRONMENT` to the environment that the deployed snippet uses for that log (from `CONFIG.logEnvironments`, or else `CONFIG.environment`), e.g. `trillian` for Sectigo's Tiger:
 
 ```
-CTREQ_LOG_URL=https://ct.example.com/2026h1 CTREQ_ENVIRONMENT=tesseract npm test
+CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com CTREQ_ENVIRONMENT=trillian npm test
 ```
 
 Each request that the local snippet rejects is then also sent to that URL, which must answer with the same status and `X-CTreq-Reject` reason.  Requests that the snippet would forward to the origin are never sent, so nothing is submitted to the log; those cases are only checked locally, and each test reports which requests were sent.  Only the paths under the base URL ending in `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` are used.
