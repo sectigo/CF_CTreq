@@ -96,7 +96,9 @@ if (sunlightVersion === trillianVersion) {
   runModels(trillianVersion, ["trillian"], corpusFile, verdicts);
 }
 
-// The snippet's outcomes: its rejection reason, or "forwarded".
+// The snippet's outcomes: its rejection reason, or "forwarded". Its get-roots requests get
+// this too, which isn't a list of roots, so it doesn't check chains against roots (which
+// the models don't model).
 globalThis.fetch = async () => new Response("origin");
 const falseRejections = [];
 const summary = {};
