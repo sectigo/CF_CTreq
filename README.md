@@ -180,7 +180,16 @@ The snippet's body size limit is the origin's (see [`body-too-large`](#body-too-
 
 ## Deployment
 
-Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.js`](cf_ctreq.js), first setting `CONFIG.environment` to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leaving it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software (see [Origin environment](#origin-environment)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
+Set `CONFIG.environment` in [`cf_ctreq.js`](cf_ctreq.js) to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leave it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software (see [Origin environment](#origin-environment)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)). Then generate the deployment file:
+
+```
+npm ci
+npm run build
+```
+
+This uses [Terser](https://terser.org/) to remove comments, compress code and shorten variable names, writing [`cf_ctreq.min.js`](cf_ctreq.min.js) without changing the readable source. Do not edit the generated file directly. The [minification workflow](.github/workflows/minify.yml) regenerates, tests and commits it to the same branch whenever the source or minifier configuration changes on a push (or when run manually). The workflow needs permission to push to that branch; branch protection rules must allow its bot commits.
+
+Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.min.js`](cf_ctreq.min.js), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
 
 ```
 ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.uri.path, "/ct/v1/add-pre-chain")
@@ -194,7 +203,7 @@ The snippet makes up to two subrequests per request: one to forward it, and, at 
 
 ### Limits
 
-Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code; [`cf_ctreq.js`](cf_ctreq.js) is about 37 KB, which is currently over that limit.  Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
+Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of execution time, 2 MB of memory and 32 KB of code. Deploy [`cf_ctreq.min.js`](cf_ctreq.min.js), which is tested against that size limit, rather than the larger readable source. Measured with Node.js on a typical machine, a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
 
 Checking the chain against the cached accepted roots adds no measurable time.  Reading the roots, when they aren't cached in memory, adds about 0.4 ms for a log with 232 roots (350 KB) and 0.9 ms for one with 670 roots (1 MB), and each log's cached hashes take about 4 KB of memory, including their cache entry.  As the response is streamed, it is never all in memory, whereas parsing it with `JSON.parse()` would need over 2 MB for the larger one.
 
@@ -260,7 +269,13 @@ Requires Node.js 18 or later (no dependencies):
 npm test
 ```
 
-The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 18, the current LTS version and the latest version.  Besides checking behaviour, they check that [`cf_ctreq.js`](cf_ctreq.js) stays within a Snippet's [size and time limits](#limits).
+The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 18, the current LTS version and the latest version. Besides checking behaviour, they check the minified file's size and the snippet's execution time against a Snippet's [limits](#limits). To run the same behaviour tests against the minified code, including checking that the generated file matches the current source and minifier settings:
+
+```
+npm ci
+npm run build
+npm run test:minified
+```
 
 To also print every certificate chain the tests submit (decoded with `openssl x509`, which must be installed) and how the snippet responds to it, use npm's verbose flag:
 
@@ -284,7 +299,7 @@ The differential tests check that, in each environment, the snippet never reject
 npm run test:differential
 ```
 
-`CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions.  They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request.
+`CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions. Set `CTREQ_DIFF_SNIPPET=cf_ctreq.min.js` to test the generated file instead. They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request, against both the readable source and the minified code.
 
 Generated requests can only explore the variants that the generator knows about, so the tests can also replay real ones: recent entries (256 per log by default) from every usable or qualified log in [Google's log list](https://www.gstatic.com/ct/log_list/v3/log_list.json), both RFC 6962 logs (`get-entries`) and static-ct-api logs (data tiles and issuers), each rebuilt as the `add-chain` or `add-pre-chain` request that could have submitted it and compared in the same way.  This needs network access:
 
