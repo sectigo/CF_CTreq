@@ -17,7 +17,7 @@ export const POISON_EXT = ext(ctOid(3), true, [0x05, 0x00]);
 // versionField replaces the whole [0] field. beforeExtensions and afterExtensions are
 // raw bytes placed around the [3] extensions field, which extensionsField replaces.
 // outerAlgorithm replaces the signature algorithm after the TBSCertificate.
-export function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), version = [2], versionField, beforeExtensions = [], extensionsField, afterExtensions = [], outerAlgorithm } = {}) {
+export function makeCert({ extensions, issuer = "Test CA", subject = Buffer.alloc(100, 0x61), version = [2], versionField, beforeExtensions = [], extensionsField, afterExtensions = [], outerAlgorithm } = {}) {
   const alg = seq(tlv(0x06, [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]));
   const name = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, cn))));
   const time = tlv(0x17, Buffer.from("260101000000Z"));
@@ -25,7 +25,7 @@ export function makeCert({ extensions, subject = Buffer.alloc(100, 0x61), versio
     versionField ? Buffer.from(versionField) : version === null ? Buffer.alloc(0) : tlv(0xa0, tlv(0x02, version)),
     tlv(0x02, [1]),
     alg,
-    name("Test CA"),
+    name(issuer),
     seq(time, time),
     name(subject),
     seq(alg, tlv(0x03, [0, ...Array(32).fill(1)])),

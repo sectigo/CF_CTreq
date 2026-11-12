@@ -23,6 +23,11 @@
 //   Certificate.
 // - Each certificate's issuer name must be byte-identical to the subject name of
 //   the next certificate in the chain. Signatures are not verified.
+// - The chain must lead to one of the log's accepted roots, as listed by the origin's
+//   get-roots endpoint: the issuer name of one of its certificates (or the subject
+//   name of the last) must have the same hash as a root's subject name. The list is
+//   cached for CONFIG.rootsCacheSeconds; if it can't be fetched or read, this check is
+//   skipped.
 // CONFIG.environment selects whose criteria apply: "sunlight", "tesseract", or
 // "trillian" rejects what that origin would reject, and "common" only rejects what
 // all of them would reject. CONFIG.logEnvironments can select a different one for
@@ -51,6 +56,9 @@ const CONFIG = {
   maxBodyBytes: null,
   maxChainLength: 10,
   minCertBytes: 128,
+  // How long each log's accepted roots (from its get-roots endpoint) are cached, both in
+  // Cloudflare's cache and in the snippet's memory.
+  rootsCacheSeconds: 60,
   // Prefix of the problem details "type" URI; the rejection reason code is appended.
   problemTypeBase: "https://github.com/sectigo/CF_CTreq#",
 };
@@ -531,8 +539,9 @@ function parseChain(ders, origin) {
 }
 
 // Returns the rejection, if any, that the origin would make for a chain parsed by
-// parseChain(), or null if it would accept it as far as this snippet checks.
-function chainRejection(origin, certs, isPreChainAPI) {
+// parseChain(), given the hashes of the log's accepted root names (from rootHashes()),
+// or null if it would accept it as far as this snippet checks.
+function chainRejection(origin, certs, isPreChainAPI, roots) {
   if (!Array.isArray(certs)) {
     return entryRejection("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate", certs, "cannot be parsed as an X.509 certificate");
   }
@@ -557,12 +566,176 @@ function chainRejection(origin, certs, isPreChainAPI) {
   if (origin.rejectsPrecertSigningCerts && hasPoison && certs.length > 1 && isPrecertSigningCert(certs[1], origin)) {
     return rejection("psc-not-supported", "precertificate signing certificates are not supported");
   }
-  for (let i = 0; i + 1 < certs.length; i++) {
-    if (certs[i].issuer !== certs[i + 1].subject) {
+  // The origins find a chain's root by name: the verified chain must be the submitted
+  // chain, perhaps followed by a root whose subject is the last certificate's issuer, so
+  // that some certificate's issuer is a root's subject, unless the chain is just a root.
+  // Once one is, the rest needn't be looked up.
+  let rooted = roots === null;
+  for (let i = 0; i < certs.length; i++) {
+    rooted ||= isRoot(roots, certs[i].issuer);
+    if (i + 1 < certs.length && certs[i].issuer !== certs[i + 1].subject) {
       return rejection("issuer-mismatch", "issuer of a certificate does not match the subject of the next certificate in the chain", 400, {}, `the issuer of chain[${i}] does not match the subject of chain[${i + 1}]`);
     }
   }
+  if (!rooted && !isRoot(roots, certs.at(-1).subject)) {
+    return rejection("root-not-accepted", "chain does not lead to a root that this log accepts");
+  }
   return null;
+}
+
+// Returns the 32-bit FNV-1a hash of [start, end) of a binary string.
+function nameHash(s, start = 0, end = s.length) {
+  let h = 0x811c9dc5;
+  for (let i = start; i < end; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  }
+  return h >>> 0;
+}
+
+// Returns whether a name's hash is among the roots' (a sorted Uint32Array), by binary
+// search. A hash that matches a different name only causes a chain to be forwarded,
+// for the origin to reject, so collisions (even contrived ones) are harmless.
+function isRoot(roots, name) {
+  const h = nameHash(name);
+  let lo = 0;
+  for (let hi = roots.length; lo < hi; ) {
+    const mid = (lo + hi) >>> 1;
+    if (roots[mid] < h) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return roots[lo] === h;
+}
+
+// Each log's accepted roots, by get-roots URL: { roots, expires }, roots being the
+// sorted hashes of their subject names (4 bytes per root), or null if they couldn't be
+// read.
+const ROOTS_CACHE = new Map();
+const MAX_CACHED_LOGS = 100;
+// Roots' subjects are mostly within their first 513 bytes (684 base64 characters).
+const ROOT_PREFIX_CHARS = 684;
+// The largest get-roots response that is read (the largest real ones are about 1 MB),
+// so that reading one stays well within the time limit.
+const MAX_ROOTS_BYTES = 2 * 1024 * 1024;
+const ASCII = new TextDecoder();
+
+// Returns the hashes of the accepted root names of the log that a request (to add-chain
+// or add-pre-chain) is for, or null if they are unknown, from the in-memory cache, or else
+// the get-roots endpoint, whose response Cloudflare caches too. Only data is shared
+// between requests, never a promise, as I/O can't be.
+async function rootHashes(url) {
+  const rootsUrl = url.origin + url.pathname.slice(0, url.pathname.lastIndexOf("/") + 1) + "get-roots";
+  const cached = ROOTS_CACHE.get(rootsUrl);
+  if (cached !== undefined && cached.expires > Date.now()) {
+    return cached.roots;
+  }
+  let roots;
+  try {
+    const response = await fetch(rootsUrl, { cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": CONFIG.rootsCacheSeconds } } });
+    roots = await readRootHashes(response);
+  } catch {
+    return null; // E.g. a network error; not cached, so the next request tries again.
+  }
+  // Least recently fetched first, so that the oldest is evicted.
+  ROOTS_CACHE.delete(rootsUrl);
+  if (ROOTS_CACHE.size >= MAX_CACHED_LOGS) {
+    ROOTS_CACHE.delete(ROOTS_CACHE.keys().next().value);
+  }
+  ROOTS_CACHE.set(rootsUrl, { roots, expires: Date.now() + CONFIG.rootsCacheSeconds * 1000 });
+  return roots;
+}
+
+// Reads a get-roots response, {"certificates":["<base64 DER>",...]}, returning the
+// sorted hashes of the roots' subject names, or null if it isn't one. It's streamed,
+// and only enough of each root is decoded to find its subject, so that a response of a
+// megabyte (hundreds of roots) needs little memory and CPU time. Go's encoding/json escapes no base64
+// characters, so each string ends at the next quote. A response larger than
+// MAX_ROOTS_BYTES isn't read.
+async function readRootHashes(response) {
+  if (!response.ok || response.body === null) {
+    await response.body?.cancel();
+    return null;
+  }
+  const reader = response.body.getReader();
+  const hashes = [];
+  let key;
+  let pending = new Uint8Array(0);
+  let total = 0;
+  for (let r = await reader.read(); !r.done; r = await reader.read()) {
+    total += r.value.length;
+    if (total > MAX_ROOTS_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    let buf = r.value;
+    if (pending.length) {
+      buf = new Uint8Array(pending.length + r.value.length);
+      buf.set(pending);
+      buf.set(r.value, pending.length);
+    }
+    let i = 0;
+    for (let open, close; (open = buf.indexOf(0x22, i)) !== -1; i = close + 1) {
+      close = buf.indexOf(0x22, open + 1);
+      if (close === -1) {
+        break;
+      }
+      const string = buf.subarray(open + 1, close);
+      // The first string must be the key, and the rest roots.
+      const hash = key === undefined ? ((key = ASCII.decode(string)) === "certificates" ? -1 : null) : rootHash(string);
+      if (hash === null) {
+        await reader.cancel();
+        return null;
+      }
+      if (hash >= 0) {
+        hashes.push(hash);
+      }
+    }
+    pending = buf.subarray(buf.indexOf(0x22, i) === -1 ? buf.length : i);
+  }
+  return key === undefined ? null : new Uint32Array(hashes).sort();
+}
+
+// Returns the hash of a root's subject name from the bytes of its base64 DER, or null
+// if it can't be found. Usually, only a prefix needs decoding.
+function rootHash(bytes) {
+  try {
+    let der = atob(ASCII.decode(bytes.subarray(0, ROOT_PREFIX_CHARS)));
+    let subject = subjectOf(der);
+    if (subject === null && bytes.length > ROOT_PREFIX_CHARS) {
+      der = atob(ASCII.decode(bytes));
+      subject = subjectOf(der);
+    }
+    return subject === null ? null : nameHash(der, subject.start, subject.end);
+  } catch {
+    return null; // Not base64.
+  }
+}
+
+// Returns the location of the subject name in a DER certificate, or a prefix of one,
+// or null if it isn't found there. Roots are trusted to be well-formed, so the
+// Certificate and TBSCertificate headers, whose values extend past a prefix, are
+// simply skipped.
+function subjectOf(der) {
+  let i = 0;
+  for (let n = 0; n < 2; n++) {
+    const length = der.charCodeAt(i + 1);
+    i += 2 + (length > 0x80 ? length & 0x7f : 0);
+  }
+  if (der.charCodeAt(i) === 0xa0) {
+    i = derDecode(der, i)?.end ?? der.length; // version
+  }
+  let field;
+  // serialNumber, signature, issuer, validity, subject.
+  for (const tag of [0x02, 0x30, 0x30, 0x30, 0x30]) {
+    field = derDecode(der, i);
+    if (field?.tag !== tag) {
+      return null;
+    }
+    i = field.end;
+  }
+  return field;
 }
 
 // Returns true for an add-pre-chain path, false for an add-chain path, or null for any
@@ -699,6 +872,8 @@ export default {
     if (request.method !== "POST") {
       return fetch(request);
     }
+    // Started now, so that any fetch of the roots overlaps reading and parsing the body.
+    const rootsPromise = rootHashes(url);
 
     // A body is only too large if it's too large for every origin in the environment.
     const maxBodyBytes = CONFIG.maxBodyBytes ?? Math.max(...origins.map((o) => o.maxBodyBytes));
@@ -719,12 +894,13 @@ export default {
     // TesseraCT's reason if it is one of them (else the first origin's). Origins with
     // the same X.509 parser share the parsed chain.
     const parsed = new Map();
-    const rejections = origins.map((origin) => {
+    for (const origin of origins) {
       if (!parsed.has(origin.x509)) {
         parsed.set(origin.x509, parseChain(ders, origin));
       }
-      return chainRejection(origin, parsed.get(origin.x509), isPreChainAPI);
-    });
+    }
+    const roots = await rootsPromise;
+    const rejections = origins.map((origin) => chainRejection(origin, parsed.get(origin.x509), isPreChainAPI, roots));
     if (rejections.every((r) => r !== null)) {
       return errorResponse(rejections[Math.max(0, origins.indexOf(ORIGINS.tesseract))], origins);
     }
