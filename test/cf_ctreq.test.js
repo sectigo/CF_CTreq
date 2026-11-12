@@ -846,6 +846,75 @@ describe("Certificate and chain validation", () => {
 });
 
 describe("Accepted roots and caching", () => {
+  test("chains rejected by every origin do not wait for roots", async () => {
+    const badCert = b64(der(Array(160).fill(0xab)));
+    const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
+    const duplicatePoison = b64(makeCert({ extensions: [ext(ctOid(3), false, NULL), POISON_EXT] }));
+    const cases = [
+      ["/ct/v1/add-chain", [badCert], "cert-unparseable"],
+      ["/ct/v1/add-chain", [NONCRITICAL], "poison-invalid"],
+      ["/ct/v1/add-chain", [PRECERT], "precert-on-add-chain"],
+      ["/ct/v1/add-pre-chain", [CERT], "cert-on-add-pre-chain"],
+      ["/ct/v1/add-chain", [CERT, otherCA], "issuer-mismatch"],
+      ["/ct/v1/add-chain", [PRECERT, badCert], "cert-unparseable"],
+      ["/ct/v1/add-pre-chain", [duplicatePoison], expected({ tesseract: "cert-unparseable", sunlight: "poison-invalid", trillian: "poison-invalid", common: "cert-unparseable" })],
+    ];
+    if (ENVIRONMENT === "sunlight") {
+      const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
+      cases.push(["/ct/v1/add-pre-chain", [PRECERT, psc, ISSUER], "psc-not-supported"]);
+    }
+    for (const [path, chain, reason] of cases) {
+      const s = await freshSnippet();
+      let releaseRoots;
+      getRoots = () => new Promise((resolve) => { releaseRoots = resolve; });
+      const request = s.fetch(post(path, { chain }));
+      let timer;
+      try {
+        const res = await Promise.race([
+          request,
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("waited for roots")), 1000); }),
+        ]);
+        assert.equal(outcome(res), reason, path);
+        assert.equal(forwarded, null);
+      } finally {
+        clearTimeout(timer);
+        releaseRoots(rootsResponse(ISSUER));
+        await request;
+      }
+    }
+    assert.equal(rootsFetches.length, cases.length);
+  });
+
+  test("common waits for roots when only some origins reject", async () => {
+    const s = await loadSnippet("common");
+    // TesseraCT rejects the version; Sunlight and Trillian accept it.
+    const chain = [b64(makeCert({ version: [3] })), ISSUER];
+    for (const [host, roots, want] of [
+      ["accepted", rootsResponse(ISSUER), "forwarded"],
+      ["unaccepted", rootsResponse(), "cert-unparseable"],
+      ["unavailable", new Response(null, { status: 503 }), "forwarded"],
+    ]) {
+      let releaseRoots;
+      getRoots = () => new Promise((resolve) => { releaseRoots = resolve; });
+      const request = s.fetch(new Request(`https://${host}.example.com/ct/v1/add-chain`, {
+        method: "POST",
+        body: JSON.stringify({ chain }),
+      }));
+      let timer;
+      try {
+        const result = await Promise.race([
+          request.then(() => "settled"),
+          new Promise((resolve) => { timer = setTimeout(() => resolve("waiting"), 30); }),
+        ]);
+        assert.equal(result, "waiting", host);
+      } finally {
+        clearTimeout(timer);
+        releaseRoots(roots);
+      }
+      assert.equal(outcome(await request), want, host);
+    }
+  });
+
   test("the chain must lead to an accepted root, whose subject is the issuer of any certificate in it", async () => {
     const s = await freshSnippet();
     // leaf <- A <- B, issued by C.

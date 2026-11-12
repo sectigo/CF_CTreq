@@ -542,10 +542,8 @@ function parseChain(ders, origin) {
   return certs;
 }
 
-// Returns the rejection, if any, that the origin would make for a chain parsed by
-// parseChain(), given the hashes of the log's accepted root names (from rootHashes()),
-// or null if it would accept it as far as this snippet checks.
-function chainRejection(origin, certs, isPreChainAPI, roots) {
+// Returns the origin's rejection, if any, before checking the accepted roots.
+function chainRejection(origin, certs, isPreChainAPI) {
   if (!Array.isArray(certs)) {
     return entryRejection("cert-unparseable", "chain entry cannot be parsed as an X.509 certificate", certs, "cannot be parsed as an X.509 certificate");
   }
@@ -570,21 +568,25 @@ function chainRejection(origin, certs, isPreChainAPI, roots) {
   if (origin.rejectsPrecertSigningCerts && hasPoison && certs.length > 1 && isPrecertSigningCert(certs[1], origin)) {
     return rejection("psc-not-supported", "precertificate signing certificates are not supported");
   }
-  // The origins find a chain's root by name: the verified chain must be the submitted
-  // chain, perhaps followed by a root whose subject is the last certificate's issuer, so
-  // that some certificate's issuer is a root's subject, unless the chain is just a root.
-  // Once one is, the rest needn't be looked up.
-  let rooted = roots === null;
   for (let i = 0; i < certs.length; i++) {
-    rooted ||= isRoot(roots, certs[i].issuer);
     if (i + 1 < certs.length && certs[i].issuer !== certs[i + 1].subject) {
       return rejection("issuer-mismatch", "issuer of a certificate does not match the subject of the next certificate in the chain", 400, {}, `the issuer of chain[${i}] does not match the subject of chain[${i + 1}]`);
     }
   }
-  if (!rooted && !isRoot(roots, certs.at(-1).subject)) {
-    return rejection("root-not-accepted", "chain does not lead to a root that this log accepts");
-  }
   return null;
+}
+
+// An issuer or the last subject must match an accepted root; stop at the first match.
+function rootRejection(certs, roots) {
+  if (roots === null) {
+    return null;
+  }
+  for (const cert of certs) {
+    if (isRoot(roots, cert.issuer)) {
+      return null;
+    }
+  }
+  return isRoot(roots, certs.at(-1).subject) ? null : rejection("root-not-accepted", "chain does not lead to a root that this log accepts");
 }
 
 // Returns the 32-bit FNV-1a hash of [start, end) of a binary string.
@@ -904,8 +906,15 @@ export default {
           parsed.set(origin.x509, parseChain(ders, origin));
         }
       }
-      const roots = await rootsPromise;
-      const rejections = origins.map((origin) => chainRejection(origin, parsed.get(origin.x509), isPreChainAPI, roots));
+      const rejections = origins.map((origin) => chainRejection(origin, parsed.get(origin.x509), isPreChainAPI));
+      if (rejections.some((r) => r === null)) {
+        const roots = await rootsPromise;
+        for (const [i, origin] of origins.entries()) {
+          if (rejections[i] === null) {
+            rejections[i] = rootRejection(parsed.get(origin.x509), roots);
+          }
+        }
+      }
       if (rejections.every((r) => r !== null)) {
         return errorResponse(rejections[Math.max(0, origins.indexOf(ORIGINS.tesseract))], origins);
       }
