@@ -1,5 +1,5 @@
-// CF_CTreq - Preprocessor for Certificate Transparency (CT) log API requests
-// (RFC6962 and Static CT), implemented in JavaScript as a Cloudflare Snippet.
+// CF_CTreq - Edge validator for Certificate Transparency (CT) log submissions
+// (RFC 6962 and Static CT), implemented in JavaScript as a Cloudflare Snippet.
 //
 // Version 1.4.0.
 //

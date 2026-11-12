@@ -23,7 +23,7 @@
 
 ## What is it?
 
-CF_CTreq is a preprocessor for Certificate Transparency (CT) log API requests (RFC6962 and Static CT), implemented in JavaScript as a [Cloudflare Snippet](https://developers.cloudflare.com/rules/snippets/).
+CF_CTreq is an edge validator for Certificate Transparency (CT) log submissions (RFC 6962 and Static CT), implemented in JavaScript as a [Cloudflare Snippet](https://developers.cloudflare.com/rules/snippets/).  It rejects `add-chain` and `add-pre-chain` requests at the edge when the log would reject them anyway, and forwards everything else unchanged.
 
 ## Why is it needed?
 
