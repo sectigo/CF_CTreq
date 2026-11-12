@@ -211,6 +211,29 @@ const nameDer = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0
 const freshSnippet = () => loadSnippet(ENVIRONMENT);
 const NULL = [0x05, 0x00];
 
+// Cloudflare limits a Snippet's CPU time, not its elapsed time, so this measures the CPU
+// time of Node's main thread, which excludes time spent waiting for other processes.
+// Node 18 lacks process.threadCpuUsage(), so elapsed time (an upper bound) is used there.
+const CPU_TIME = typeof process.threadCpuUsage === "function";
+const cpuMs = (start) => {
+  const { user, system } = process.threadCpuUsage(start);
+  return (user + system) / 1000;
+};
+// Returns the least time, in ms, taken by run(prepare(i)) over several runs, so that
+// garbage collection and scheduling don't decide the result. prepare() isn't timed.
+async function fastest(prepare, run, runs = 5) {
+  let best = Infinity;
+  for (let i = 0; i < runs; i++) {
+    const input = prepare(i);
+    const wallStart = performance.now();
+    const cpuStart = CPU_TIME ? process.threadCpuUsage() : undefined;
+    await run(input);
+    best = Math.min(best, CPU_TIME ? cpuMs(cpuStart) : performance.now() - wallStart);
+  }
+  return best;
+}
+const timeKind = CPU_TIME ? "of CPU time" : "elapsed";
+
 describe("Routing and request methods", () => {
   test("other requests pass through untouched", async () => {
     let res = await snippet.fetch(new Request("https://log.example.com/ct/v1/get-sth"));
@@ -1058,21 +1081,19 @@ describe("Accepted roots and caching", () => {
     // 700 roots of about 1,500 bytes, like the largest real get-roots responses (~1 MB).
     const roots = Array.from({ length: 700 }, (_, i) =>
       b64(makeCert({ subject: Buffer.from(`Root CA ${i} `.padEnd(120, "x")), issuer: `Root CA ${i} `.padEnd(120, "x"), extensions: [ext([0x2a, 0x03], false, Buffer.alloc(1000, i))] })));
-    const body = JSON.stringify({ certificates: roots });
+    const body = new TextEncoder().encode(JSON.stringify({ certificates: roots }));
     assert.ok(body.length > 1_000_000, `${body.length} bytes`);
     getRoots = () => new Response(body);
-    const last = `Root CA 699 `.padEnd(120, "x");
-    const request = (log) => s.fetch(new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: JSON.stringify({ chain: [b64(makeCert({ issuer: last }))] }) }));
-    await request("warm-up");
-    let start = performance.now();
-    assert.equal(outcome(await request("miss")), "forwarded");
-    const miss = performance.now() - start;
-    start = performance.now();
-    assert.equal(outcome(await request("miss")), "forwarded");
-    const hit = performance.now() - start;
+    const chain = JSON.stringify({ chain: [b64(makeCert({ issuer: `Root CA 699 `.padEnd(120, "x") }))] });
+    const request = (log) => new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: chain });
+    const submit = async (req) => assert.equal(outcome(await s.fetch(req)), "forwarded");
+    await submit(request("warm-up"));
+    // Each log's roots are read once, then cached.
+    const miss = await fastest((i) => request(`miss${i}`), submit);
+    const hit = await fastest(() => request("miss0"), submit);
     // Generous, so as not to fail on a slow machine.
-    assert.ok(miss < 40, `reading the roots took ${miss.toFixed(1)} ms`);
-    assert.ok(hit < 5, `with cached roots, took ${hit.toFixed(1)} ms`);
+    assert.ok(miss < 40, `reading the roots took ${miss.toFixed(1)} ms ${timeKind}`);
+    assert.ok(hit < 5, `with cached roots, took ${hit.toFixed(1)} ms ${timeKind}`);
   });
 });
 
@@ -1241,14 +1262,14 @@ describe("Snippet size and performance", () => {
     // Distinct OIDs 1.2.<k>, so that the duplicate check has to compare them all.
     const arc = (k) => (k < 128 ? [k] : [0x80 | (k >> 7), k & 0x7f]);
     const many = b64(makeCert({ extensions: Array.from({ length: 7000 }, (_, k) => ext([0x2a, ...arc(k)], false, [])) }));
-    const request = () => snippet.fetch(post("/ct/v1/add-chain", { chain: [many] }));
-    await request();
-    const start = performance.now();
-    const res = await request();
-    const elapsed = performance.now() - start;
-    assert.equal(outcome(res), "forwarded");
+    const body = JSON.stringify({ chain: [many] });
+    // The local snippet, so that the test's wrappers aren't timed; the chain is forwarded,
+    // so it would never be sent to a deployed log anyway.
+    const submit = async (req) => assert.equal(outcome(await localSnippet.fetch(req)), "forwarded");
+    await submit(post("/ct/v1/add-chain", body));
+    const time = await fastest(() => post("/ct/v1/add-chain", body), submit);
     // About 1 ms when the duplicate check uses a Set, but ~100 ms when it compared every
     // pair of extensions; generous, so as not to fail on a slow machine.
-    assert.ok(elapsed < 40, `took ${elapsed.toFixed(1)} ms`);
+    assert.ok(time < 40, `took ${time.toFixed(1)} ms ${timeKind}`);
   });
 });
