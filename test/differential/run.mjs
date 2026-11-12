@@ -17,6 +17,7 @@
 //   CTREQ_REPLAY_ENTRIES, CTREQ_REPLAY_LOGS
 //                      with --replay, the entries per log and the logs (see replay.mjs)
 import { spawnSync } from "node:child_process";
+import assert from "node:assert/strict";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +26,8 @@ import { replay } from "./replay.mjs";
 
 const here = new URL(".", import.meta.url).pathname;
 const SOURCE = readFileSync(process.env.CTREQ_DIFF_SNIPPET || new URL("../../cf_ctreq.js", import.meta.url), "utf8");
+const CONFIG_ENVIRONMENT = /((?:^|[{,])\s*environment:\s*)"[a-z]*"/m;
+assert.match(SOURCE, CONFIG_ENVIRONMENT, "the snippet must set CONFIG.environment to a string literal");
 const versions = JSON.parse(readFileSync(join(here, "versions.json"), "utf8"))["certificate-transparency-go"];
 const sunlightVersion = process.env.CTREQ_DIFF_SUNLIGHT || versions.sunlight;
 const trillianVersion = process.env.CTREQ_DIFF_TRILLIAN || versions.trillian;
@@ -44,7 +47,7 @@ const ENVIRONMENTS = {
 const ENDPOINTS = ["add-chain", "add-pre-chain"];
 
 const loadSnippet = async (environment) => {
-  const source = SOURCE.replace(/^(\s*environment: )"[a-z]*"/m, `$1${JSON.stringify(environment)}`);
+  const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`);
   return (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
 };
 

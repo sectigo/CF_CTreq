@@ -8,18 +8,28 @@ import { tlv, seq, ctOid, OID_EKU, ext, POISON_EXT, makeCert, b64, makeCA, der, 
 // for the snippet under test; by default, the snippet's own setting is tested. Another
 // setting is applied to a copy of the source, so that CONFIG needn't be exported.
 const SOURCE = readFileSync(new URL("../cf_ctreq.js", import.meta.url), "utf8");
+const MINIFIED = readFileSync(new URL("../cf_ctreq.min.js", import.meta.url), "utf8");
+const minifying = process.env.CTREQ_MINIFIED === "1";
+const terser = minifying ? await import("terser") : null;
+const minifyOptions = minifying ? JSON.parse(readFileSync(new URL("../terser.config.json", import.meta.url), "utf8")) : null;
 const CONFIG_ENVIRONMENT = /^(\s*environment: )"([a-z]*)"/m;
 assert.match(SOURCE, CONFIG_ENVIRONMENT, "cf_ctreq.js must set CONFIG.environment to a string literal");
 // Each load is a new module (as modules are cached by URL), with its own state.
 let loads = 0;
-async function loadSnippet(environment) {
-  const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`) + `\n// ${++loads}\n`;
+async function loadSource(source) {
+  if (minifying) {
+    source = (await terser.minify(source, minifyOptions)).code;
+  }
+  source += `\n// ${++loads}\n`;
   return (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
+}
+async function loadSnippet(environment) {
+  return loadSource(SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`));
 }
 const ENVIRONMENT = process.env.CTREQ_ENVIRONMENT || SOURCE.match(CONFIG_ENVIRONMENT)[2];
 // The loaded module is never modified, so that it is always the local snippet. Tests use
 // `snippet`, which the wrappers below may replace.
-const localSnippet = process.env.CTREQ_ENVIRONMENT ? await loadSnippet(ENVIRONMENT) : (await import("../cf_ctreq.js")).default;
+const localSnippet = process.env.CTREQ_ENVIRONMENT ? await loadSnippet(ENVIRONMENT) : (await import(minifying ? "../cf_ctreq.min.js" : "../cf_ctreq.js")).default;
 let snippet = localSnippet;
 // Returns the expected value for the environment under test.
 const expected = (byEnvironment) => {
@@ -348,10 +358,15 @@ test("duplicate extensions are only rejected by TesseraCT", async () => {
   assert.equal(outcome(res), expected({ tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }));
 });
 
-test("cf_ctreq.js fits within a Snippet's 32 KB size limit", { todo: "the accepted roots check took it over the limit; to be shrunk" }, () => {
+test("cf_ctreq.min.js fits within a Snippet's 32 KB size limit", () => {
   // Cloudflare limits a Snippet's total package size to 32 KB; 32,000 bytes leaves no doubt.
-  const size = Buffer.byteLength(SOURCE);
-  assert.ok(size <= 32000, `cf_ctreq.js is ${size} bytes`);
+  const size = Buffer.byteLength(MINIFIED);
+  assert.ok(size <= 32000, `cf_ctreq.min.js is ${size} bytes`);
+});
+
+test("cf_ctreq.min.js matches the current source and minifier settings", { skip: !minifying }, async () => {
+  const { code } = await terser.minify(SOURCE, minifyOptions);
+  assert.equal(MINIFIED.trimEnd(), code);
 });
 
 test("thousands of extensions are checked well within a Snippet's 5 ms limit", async () => {
@@ -671,7 +686,7 @@ test("CONFIG.logEnvironments selects the environment by hostname and path", asyn
   assert.match(SOURCE, LOG_ENVIRONMENTS, "cf_ctreq.js must set CONFIG.logEnvironments to a multi-line array");
   const load = async (logEnvironments) => {
     const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`).replace(LOG_ENVIRONMENTS, `$1${logEnvironments},`);
-    return (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
+    return loadSource(source);
   };
   // OPTIONS is only answered by Sunlight, and an unknown version only rejected by TesseraCT.
   const v4 = b64(makeCert({ version: [3] }));
@@ -794,7 +809,7 @@ test("body without a Content-Length one byte over the limit gets 413", async () 
 test("CONFIG.maxBodyBytes overrides the origins' limits", async () => {
   const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`).replace(/^(\s*maxBodyBytes: )null,/m, "$11000,");
   assert.notEqual(source, SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`), "CONFIG.maxBodyBytes must be null");
-  const limited = (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
+  const limited = await loadSource(source);
   const json = JSON.stringify({ chain: [CERT] });
   assert.equal((await limited.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(1000 - json.length)))).status, 200);
   const res = await limited.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(1001 - json.length)));

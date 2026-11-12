@@ -8,8 +8,13 @@
     "node": ">=18"
   },
   "scripts": {
+    "build": "terser cf_ctreq.js --config-file terser.config.json --output cf_ctreq.min.js",
     "test": "node --test test/cf_ctreq.test.js",
+    "test:minified": "CTREQ_MINIFIED=1 node --test test/cf_ctreq.test.js",
     "test:differential": "node test/differential/run.mjs",
     "test:replay": "node test/differential/run.mjs --replay"
+  },
+  "devDependencies": {
+    "terser": "5.51.2"
   }
 }
