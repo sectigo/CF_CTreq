@@ -3,7 +3,7 @@
     {
       "repository": "transparency-dev/tesseract",
       "branch": "main",
-      "reviewed": "68d4c09d5e922920d3e4d68805d761cf45d95a0f",
+      "reviewed": "c6ca129cc1840562df3ed5143c6cc196ef7b07cf",
       "files": {
         "internal/ct/handlers.go": "d71c082bf34f694e2ff69aa58a95e125f3984782",
         "internal/ct/chain_validation.go": "f8ba27c6256bb0d45024bb2b43594b8c06413517",
@@ -12,7 +12,7 @@
         "internal/lax509/cert_pool.go": "304e50ab334353dd7b475c611d19fc1c00aeac7b",
         "internal/types/rfc6962/rfc6962.go": "dfa58f701d578bf8587b2cfd1d8e316a1794e986",
         "ctlog.go": "714abc47f6962631bd887091cd9166e8211469fb",
-        "go.mod": "47a7ef98f1b904fed46d73e16670901e37e706af"
+        "go.mod": "cf385723cb7e598976a38b3eda053d8bab8cd6f1"
       }
     },
     {
@@ -27,10 +27,10 @@
     {
       "repository": "google/certificate-transparency-go",
       "branch": "master",
-      "reviewed": "87942207da279233ca560b19aa3c91420a1366ba",
+      "reviewed": "bc63c417c7be14bc5cb9bccada7a5de148b50be4",
       "files": {
-        "trillian/ctfe/handlers.go": "cc5120a9373e6ab92c11e7388fb629e0aae34181",
-        "trillian/ctfe/cert_checker.go": "41566bf70fa62b25befe8f0231b5fa12e9ee869d",
+        "trillian/ctfe/handlers.go": "72d622ba3cea3e3c0f63ba2e4f65a199e3d334a4",
+        "trillian/ctfe/cert_checker.go": "a62d16b6cab70b51e487034fed131fe311e0bc00",
         "trillian/ctfe/ct_server/main.go": "dce189394836d8eb7146909a0bc7928708efbc14",
         "x509/x509.go": "1a1e859bbb33c7b115b3969c82e42dba2075cf9a",
         "x509/cert_pool.go": "4823d594633a0b31914f420ffea1d4ff19ed6af8",

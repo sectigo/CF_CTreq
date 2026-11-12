@@ -463,7 +463,6 @@ test("every rejection carries an X-CTreq-Reject reason", async () => {
     "body-too-large": bigLength,
     "invalid-json": post(ADD, "not json"),
     "chain-missing": post(ADD, "{}"),
-    "chain-too-long": post(ADD, { chain: Array(11).fill(CERT) }),
     "entry-not-base64": post(ADD, { chain: ["!!!"] }),
     "entry-too-short": post(ADD, { chain: [b64(der(Array(100).fill(0xab)))] }),
     "entry-not-der": post(ADD, { chain: [b64(Buffer.from([0x31, 0x81, 0xa0, ...Array(160).fill(0xab)]))] }),
@@ -524,7 +523,6 @@ test("chain shape violations are rejected", async () => {
   const SHORT = b64(der(Array(100).fill(0xab)));
   assert.ok(CERT.endsWith("="), "fixture must need base64 padding");
   const bodies = {
-    "too many entries": { chain: Array(11).fill(CERT) },
     "non-string later entry": { chain: [CERT, 1] },
     "invalid base64 later entry": { chain: [CERT, "!!!"] },
     "URL-safe base64": { chain: [CERT.replace(/\+/g, "-").replace(/\//g, "_") + "-_"] },
@@ -590,6 +588,22 @@ test("one-byte long-form DER length is accepted", async () => {
   assert.equal(buf[1], 0x81);
   const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [b64(buf)] }));
   assert.equal(res.status, 200);
+});
+
+test("chains of more than 10 entries are forwarded without being checked", async () => {
+  // Rejected with 10 entries, for an entry that isn't base64 and for not leading to a root.
+  for (const [chain, reason] of [[[...Array(9).fill(CERT), "!!!"], "entry-not-base64"], [Array(10).fill(b64(makeCert({ issuer: "Unknown CA", subject: Buffer.from("Unknown CA") }))), "root-not-accepted"]]) {
+    let res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
+    assert.equal(outcome(res), reason);
+    // But forwarded byte for byte with 11, or many more.
+    for (const extra of [[CERT], Array(1000).fill("!!!")]) {
+      const body = JSON.stringify({ chain: [...chain, ...extra] });
+      forwarded = null;
+      res = await snippet.fetch(post("/ct/v1/add-pre-chain", body));
+      assert.equal(outcome(res), "forwarded");
+      assert.equal(forwarded.body, body);
+    }
+  }
 });
 
 test("maximum chain length and extra top-level fields are accepted", async () => {

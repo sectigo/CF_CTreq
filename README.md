@@ -8,7 +8,7 @@
   - [Origin environment](#origin-environment)
   - [Rejection responses](#rejection-responses)
   - [Rejection reasons](#rejection-reasons)
-    - [`method-not-allowed`](#method-not-allowed), [`body-too-large`](#body-too-large), [`invalid-json`](#invalid-json), [`chain-missing`](#chain-missing), [`chain-too-long`](#chain-too-long), [`entry-not-base64`](#entry-not-base64), [`entry-too-short`](#entry-too-short), [`entry-not-der`](#entry-not-der), [`cert-unparseable`](#cert-unparseable), [`poison-invalid`](#poison-invalid), [`precert-on-add-chain`](#precert-on-add-chain), [`cert-on-add-pre-chain`](#cert-on-add-pre-chain), [`psc-not-supported`](#psc-not-supported), [`issuer-mismatch`](#issuer-mismatch), [`root-not-accepted`](#root-not-accepted)
+    - [`method-not-allowed`](#method-not-allowed), [`body-too-large`](#body-too-large), [`invalid-json`](#invalid-json), [`chain-missing`](#chain-missing), [`entry-not-base64`](#entry-not-base64), [`entry-too-short`](#entry-too-short), [`entry-not-der`](#entry-not-der), [`cert-unparseable`](#cert-unparseable), [`poison-invalid`](#poison-invalid), [`precert-on-add-chain`](#precert-on-add-chain), [`cert-on-add-pre-chain`](#cert-on-add-pre-chain), [`psc-not-supported`](#psc-not-supported), [`issuer-mismatch`](#issuer-mismatch), [`root-not-accepted`](#root-not-accepted)
   - [Checks that are not done](#checks-that-are-not-done)
 - [Deployment](#deployment)
   - [Limits](#limits)
@@ -111,7 +111,7 @@ In the `sunlight` and `common` environments, rejection responses (other than `40
 
 #### body-too-large
 
-`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
+`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`, though its handlers also limit every `POST` body to 512 KiB, so a larger setting has no effect), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
 
 #### invalid-json
 
@@ -121,9 +121,7 @@ In the `sunlight` and `common` environments, rejection responses (other than `40
 
 `400 Bad Request` if `chain` is missing, is not an array, or is empty.  As for the origin, `chain` is matched regardless of the case of its letters, and if there is more than one such key (e.g. both `chain` and `Chain`), the last one is used.  (The origin would also reject the request if an earlier one isn't a valid chain, but the snippet doesn't check those.)
 
-#### chain-too-long
-
-`400 Bad Request` if `chain` has more than 10 entries.
+A `chain` of more than 10 entries (`CONFIG.maxChainLength`) is forwarded to the origin without any further checks.  Real chains have at most about 5 (the longest among 86,000 recent entries in all the logs in Google's log list), but the origins accept longer ones (TesseraCT any number, and Trillian up to 100, as does Sunlight once built with a version of `certificate-transparency-go` from November 2026 or later), and checking them would only spend the Snippet's limited CPU time on requests that hardly ever occur.
 
 #### entry-not-base64
 
@@ -178,7 +176,7 @@ As far as possible, the snippet aims to only reject requests that the origin wou
 - **Embedded SCT list in a precertificate**: a precertificate with an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`) makes little sense, but none of the origins rejects one.
 - **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm (beyond matching the one after the TBSCertificate), validity, public key and signature are not checked, and nor is anything after the extensions or after an extension's value (which all the origins also ignore).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
 
-The snippet's limit on the number of chain entries is stricter than the origins': they accept any number, whereas the snippet accepts 10 (`chain-too-long`), which is enough for real certificate chains.  (Its body size limit is the origin's; see [`body-too-large`](#body-too-large).)  None of the origins has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
+The snippet's body size limit is the origin's (see [`body-too-large`](#body-too-large)).  None of the origins has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
 
 ## Deployment
 
