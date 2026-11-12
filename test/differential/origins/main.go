@@ -22,10 +22,12 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
+	"github.com/google/certificate-transparency-go/x509util"
 )
 
 var poison = stdasn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 3}
@@ -65,10 +67,14 @@ func tesseract(chain [][]byte, preChain bool) bool {
 	return isPrecert == preChain
 }
 
-// ctgo models Sunlight (rejectPreIssuers) and Trillian: certificate-transparency-go's
-// x509 package and ctfe.IsPrecertificate(), with issuer names matching the next
-// certificate's subject byte for byte (as its chain verification requires).
+// ctgo models Sunlight (rejectPreIssuers) and Trillian: ctfe.ValidateChain()'s limit on
+// the chain's length (if any), certificate-transparency-go's x509 package and
+// ctfe.IsPrecertificate(), with issuer names matching the next certificate's subject
+// byte for byte (as its chain verification requires).
 func ctgo(chain [][]byte, preChain, rejectPreIssuers bool) bool {
+	if chainTooLong(len(chain)) {
+		return false
+	}
 	var certs []*x509.Certificate
 	for _, der := range chain {
 		c, err := x509.ParseCertificate(der)
@@ -92,6 +98,19 @@ func ctgo(chain [][]byte, preChain, rejectPreIssuers bool) bool {
 	return isPrecert == preChain
 }
 
+// chainTooLong returns whether ctfe.ValidateChain() rejects a chain of n certificates for
+// its length, as it does for more than 100 since certificate-transparency-go bc63c417.
+// It checks that before parsing them, so a chain of empty certificates either fails
+// that check, or fails to parse.
+func chainTooLong(n int) bool {
+	if n == 0 {
+		return false // ValidateChain() would panic.
+	}
+	opts := ctfe.NewCertValidationOpts(x509util.NewPEMCertPool(), time.Time{}, false, false, nil, nil, false, nil)
+	_, err := ctfe.ValidateChain(make([][]byte, n), opts)
+	return err != nil && strings.Contains(err.Error(), "exceeds maximum allowed length")
+}
+
 type model struct {
 	accepts func(chain [][]byte, preChain bool) bool
 	// The default maximum request body size, beyond which the origin's
@@ -104,7 +123,8 @@ var models = map[string]model{
 	"tesseract": {tesseract, 512 << 10},
 	// Fixed (internal/ctlog/http.go)
 	"sunlight": {func(chain [][]byte, preChain bool) bool { return ctgo(chain, preChain, true) }, 128 * 1024},
-	// --max_cert_chain_size (trillian/ctfe/ct_server/main.go)
+	// --max_cert_chain_size (trillian/ctfe/ct_server/main.go); its handlers also limit
+	// POST bodies to 512 KiB, since certificate-transparency-go bc63c417.
 	"trillian": {func(chain [][]byte, preChain bool) bool { return ctgo(chain, preChain, false) }, 512000},
 }
 

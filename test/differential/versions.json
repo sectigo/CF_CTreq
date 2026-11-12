@@ -1,6 +1,6 @@
 {
   "certificate-transparency-go": {
     "sunlight": "v1.3.3",
-    "trillian": "v1.3.4-0.20261109163911-87942207da27"
+    "trillian": "v1.3.4-0.20261112113238-bc63c417c7be"
   }
 }
