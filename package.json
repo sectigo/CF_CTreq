@@ -5,7 +5,7 @@
   "description": "Cloudflare Snippet that rejects Certificate Transparency add-chain and add-pre-chain requests at the edge when the log would reject them anyway",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19"
   },
   "scripts": {
     "build": "terser cf_ctreq.js --config-file terser.config.json --output cf_ctreq.min.js",

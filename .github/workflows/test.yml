@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         # The oldest supported version, the current LTS and the latest release.
-        node: ["18", "lts/*", "latest"]
+        node: ["22", "lts/*", "latest"]
         environment: [common, tesseract, sunlight, trillian]
     steps:
       - uses: actions/checkout@v7

@@ -263,13 +263,13 @@ Cloudflare does not list Grafana or Loki as a Logpush destination, so there are 
 
 ## Testing
 
-Requires Node.js 18 or later (no dependencies):
+Requires Node.js 22.19 or later (no dependencies):
 
 ```
 npm test
 ```
 
-The test output groups related checks into named suites, roughly following the request-validation flow. The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 18, the current LTS version and the latest version. Besides checking behaviour, they check the minified file's size and the snippet's CPU time against a Snippet's [limits](#limits).  CPU time is measured with `process.threadCpuUsage()` (taking the fastest of several runs, so that garbage collection and other processes don't cause spurious failures), or as elapsed time on Node.js versions without it, such as 18. To run the same behaviour tests against the minified code, including checking that the generated file matches the current source and minifier settings:
+The test output groups related checks into named suites, roughly following the request-validation flow. The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 22, the current LTS version and the latest version. Besides checking behaviour, they check the minified file's size and the snippet's CPU time against a Snippet's [limits](#limits).  CPU time is measured with `process.threadCpuUsage()`, taking the fastest of several runs, so that garbage collection and other processes don't cause spurious failures. To run the same behaviour tests against the minified code, including checking that the generated file matches the current source and minifier settings:
 
 ```
 npm ci

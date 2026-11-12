@@ -211,28 +211,20 @@ const nameDer = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0
 const freshSnippet = () => loadSnippet(ENVIRONMENT);
 const NULL = [0x05, 0x00];
 
-// Cloudflare limits a Snippet's CPU time, not its elapsed time, so this measures the CPU
-// time of Node's main thread, which excludes time spent waiting for other processes.
-// Node 18 lacks process.threadCpuUsage(), so elapsed time (an upper bound) is used there.
-const CPU_TIME = typeof process.threadCpuUsage === "function";
-const cpuMs = (start) => {
-  const { user, system } = process.threadCpuUsage(start);
-  return (user + system) / 1000;
-};
-// Returns the least time, in ms, taken by run(prepare(i)) over several runs, so that
-// garbage collection and scheduling don't decide the result. prepare() isn't timed.
+// Cloudflare limits a Snippet's CPU time, not its elapsed time, so this returns the least
+// CPU time, in ms, that Node's main thread takes for run(prepare(i)) over several runs, so
+// that garbage collection and other processes don't decide the result. prepare() isn't timed.
 async function fastest(prepare, run, runs = 5) {
   let best = Infinity;
   for (let i = 0; i < runs; i++) {
     const input = prepare(i);
-    const wallStart = performance.now();
-    const cpuStart = CPU_TIME ? process.threadCpuUsage() : undefined;
+    const start = process.threadCpuUsage();
     await run(input);
-    best = Math.min(best, CPU_TIME ? cpuMs(cpuStart) : performance.now() - wallStart);
+    const { user, system } = process.threadCpuUsage(start);
+    best = Math.min(best, (user + system) / 1000);
   }
   return best;
 }
-const timeKind = CPU_TIME ? "of CPU time" : "elapsed";
 
 describe("Routing and request methods", () => {
   test("other requests pass through untouched", async () => {
@@ -1092,8 +1084,8 @@ describe("Accepted roots and caching", () => {
     const miss = await fastest((i) => request(`miss${i}`), submit);
     const hit = await fastest(() => request("miss0"), submit);
     // Generous, so as not to fail on a slow machine.
-    assert.ok(miss < 40, `reading the roots took ${miss.toFixed(1)} ms ${timeKind}`);
-    assert.ok(hit < 5, `with cached roots, took ${hit.toFixed(1)} ms ${timeKind}`);
+    assert.ok(miss < 40, `reading the roots took ${miss.toFixed(1)} ms of CPU time`);
+    assert.ok(hit < 5, `with cached roots, took ${hit.toFixed(1)} ms of CPU time`);
   });
 });
 
@@ -1270,6 +1262,6 @@ describe("Snippet size and performance", () => {
     const time = await fastest(() => post("/ct/v1/add-chain", body), submit);
     // About 1 ms when the duplicate check uses a Set, but ~100 ms when it compared every
     // pair of extensions; generous, so as not to fail on a slow machine.
-    assert.ok(time < 40, `took ${time.toFixed(1)} ms ${timeKind}`);
+    assert.ok(time < 40, `took ${time.toFixed(1)} ms of CPU time`);
   });
 });
