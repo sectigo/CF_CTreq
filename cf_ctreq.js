@@ -1,7 +1,7 @@
 // CF_CTreq - Edge validator for Certificate Transparency (CT) log submissions
 // (RFC 6962 and Static CT), implemented in JavaScript as a Cloudflare Snippet.
 //
-// Version 1.4.0.
+// Version 1.5.0.
 //
 // Written by Rob Stradling.
 // Copyright (C) 2026 Sectigo Limited.
