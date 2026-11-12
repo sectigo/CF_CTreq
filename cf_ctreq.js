@@ -10,9 +10,11 @@
 // a body (and any Content-Length) no larger than the origin accepts (else 413). The body
 // is parsed as the origin (Sunlight, TesseraCT, or Trillian, all using Go's
 // encoding/json) would parse it: the "chain" key is matched case-insensitively, and
-// line breaks in base64 are ignored. The chain must be a non-empty array of at most
-// CONFIG.maxChainLength base64 strings, each decoding to at least CONFIG.minCertBytes
-// and to a DER SEQUENCE whose declared length matches its actual length (else 400).
+// line breaks in base64 are ignored. The chain must be a non-empty array (else 400);
+// one of more than CONFIG.maxChainLength entries is forwarded without further checks.
+// Otherwise, its entries must be base64 strings, each decoding to at least
+// CONFIG.minCertBytes and to a DER SEQUENCE whose declared length matches its actual
+// length (else 400).
 //
 // Every certificate must then parse as X.509 down to its extensions (RFC 5280), as
 // the origin's X.509 parser would parse it, else 400, and:
@@ -54,6 +56,8 @@ const CONFIG = {
   // Maximum request body size in bytes, or null for the largest of the environment's
   // origins' defaults. Set it if the origin is configured with a different limit.
   maxBodyBytes: null,
+  // Chains with more entries (which real ones never have) are forwarded to the origin
+  // without being checked, so as not to spend the Snippet's limited CPU time on them.
   maxChainLength: 10,
   minCertBytes: 128,
   // How long each log's accepted roots (from its get-roots endpoint) are cached, both in
@@ -806,8 +810,9 @@ function methodRejection(origins, method) {
   return rejection("method-not-allowed", "method not allowed; use POST", 405, { Allow: allowed.join(", ") });
 }
 
-// Returns the rejection, if any, for a request body, or the chain's DER certificates
-// (as binary strings) if the body should be checked further.
+// Returns the rejection, if any, for a request body, the chain's DER certificates (as
+// binary strings) if the body should be checked further, or null if it should be
+// forwarded unchecked.
 function bodyRejectionOrChain(body) {
   const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(body);
   let json;
@@ -831,7 +836,7 @@ function bodyRejectionOrChain(body) {
     return rejection("chain-missing", "chain is missing or empty");
   }
   if (chain.length > CONFIG.maxChainLength) {
-    return rejection("chain-too-long", "chain has too many entries");
+    return null;
   }
   const ders = [];
   for (const [index, entry] of chain.entries()) {
@@ -887,22 +892,24 @@ export default {
     }
 
     const ders = bodyRejectionOrChain(body);
-    if (!Array.isArray(ders)) {
+    if (ders !== null && !Array.isArray(ders)) {
       return errorResponse(ders, origins);
     }
     // Only reject if every origin in the environment would reject, reporting
     // TesseraCT's reason if it is one of them (else the first origin's). Origins with
     // the same X.509 parser share the parsed chain.
-    const parsed = new Map();
-    for (const origin of origins) {
-      if (!parsed.has(origin.x509)) {
-        parsed.set(origin.x509, parseChain(ders, origin));
+    if (ders !== null) {
+      const parsed = new Map();
+      for (const origin of origins) {
+        if (!parsed.has(origin.x509)) {
+          parsed.set(origin.x509, parseChain(ders, origin));
+        }
       }
-    }
-    const roots = await rootsPromise;
-    const rejections = origins.map((origin) => chainRejection(origin, parsed.get(origin.x509), isPreChainAPI, roots));
-    if (rejections.every((r) => r !== null)) {
-      return errorResponse(rejections[Math.max(0, origins.indexOf(ORIGINS.tesseract))], origins);
+      const roots = await rootsPromise;
+      const rejections = origins.map((origin) => chainRejection(origin, parsed.get(origin.x509), isPreChainAPI, roots));
+      if (rejections.every((r) => r !== null)) {
+        return errorResponse(rejections[Math.max(0, origins.indexOf(ORIGINS.tesseract))], origins);
+      }
     }
 
     // The original body stream has been consumed, so forward a copy of its exact bytes.
