@@ -877,15 +877,14 @@ export default {
     if (request.method !== "POST") {
       return fetch(request);
     }
-    // Started now, so that any fetch of the roots overlaps reading and parsing the body.
-    const rootsPromise = rootHashes(url);
-
     // A body is only too large if it's too large for every origin in the environment.
     const maxBodyBytes = CONFIG.maxBodyBytes ?? Math.max(...origins.map((o) => o.maxBodyBytes));
     const contentLength = request.headers.get("Content-Length");
     if (contentLength !== null && Number(contentLength) > maxBodyBytes) {
       return errorResponse(rejection("body-too-large", "request body too large", 413), origins);
     }
+    // Started now, so that any fetch of the roots overlaps reading and parsing the body.
+    const rootsPromise = rootHashes(url);
     const body = await readBody(request, maxBodyBytes);
     if (body === null) {
       return errorResponse(rejection("body-too-large", "request body too large", 413), origins);

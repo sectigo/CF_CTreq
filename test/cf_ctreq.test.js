@@ -287,11 +287,76 @@ describe("Body size and forwarding", () => {
     assert.equal(forwarded, null);
   });
 
+  test("oversized Content-Length is rejected without fetching roots", async () => {
+    const s = await freshSnippet();
+    for (const endpoint of ["add-chain", "add-pre-chain"]) {
+      const req = post(`/ct/v1/${endpoint}`, { chain: [CERT, ISSUER] });
+      req.headers.set("Content-Length", String(MAX_BODY + 1));
+      const res = await s.fetch(req);
+      assert.equal(res.status, 413);
+      assert.equal(res.headers.get("X-CTreq-Reject"), "body-too-large");
+      assert.equal(req.bodyUsed, false);
+      assert.equal(forwarded, null);
+      assert.equal(rootsFetches.length, 0);
+    }
+  });
+
   test("Content-Length at the limit is accepted", async () => {
     const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
     req.headers.set("Content-Length", String(MAX_BODY));
     const res = await snippet.fetch(req);
     assert.equal(res.status, 200);
+  });
+
+  test("Content-Length at the limit still fetches roots", async () => {
+    const s = await freshSnippet();
+    const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
+    req.headers.set("Content-Length", String(MAX_BODY));
+    const res = await s.fetch(req);
+    assert.equal(res.status, 200);
+    assert.equal(rootsFetches.length, 1);
+    assert.equal(rootsFetches[0].url, "https://log.example.com/ct/v1/get-roots");
+  });
+
+  test("a log-specific environment determines the Content-Length limit before fetching roots", async () => {
+    const s = await loadSnippet("sunlight");
+    const certs = JSON.stringify({ chain: [CERT, ISSUER] });
+    const maxLength = 128 * 1024;
+    for (const [url, accepted] of [
+      ["https://log.example.com/ct/v1/add-chain", false],
+      ["https://tiger2027h1.ct.sectigo.com/ct/v1/add-chain", true],
+    ]) {
+      const req = new Request(url, { method: "POST", body: certs, headers: { "Content-Length": String(maxLength + 1) } });
+      const res = await s.fetch(req);
+      assert.equal(outcome(res), accepted ? "forwarded" : "body-too-large");
+      assert.equal(req.bodyUsed, accepted);
+      assert.equal(rootsFetches.length, accepted ? 1 : 0);
+    }
+    assert.equal(rootsFetches[0].url, "https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots");
+  });
+
+  test("fetching roots still overlaps reading a permitted body", async () => {
+    const s = await freshSnippet();
+    let startReading;
+    const reading = new Promise((resolve) => { startReading = resolve; });
+    let releaseBody;
+    const body = new ReadableStream({
+      async pull(controller) {
+        startReading();
+        await new Promise((resolve) => { releaseBody = resolve; });
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ chain: [CERT, ISSUER] })));
+        controller.close();
+      },
+    });
+    const req = new Request("https://log.example.com/ct/v1/add-chain", { method: "POST", body, duplex: "half" });
+    const response = s.fetch(req);
+    await reading;
+    try {
+      assert.equal(rootsFetches.length, 1);
+    } finally {
+      releaseBody();
+    }
+    assert.equal(outcome(await response), "forwarded");
   });
 
   test("oversized body without a Content-Length gets 413", async () => {
@@ -324,6 +389,12 @@ describe("Body size and forwarding", () => {
     assert.notEqual(source, SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`), "CONFIG.maxBodyBytes must be null");
     const limited = await loadSource(source);
     const json = JSON.stringify({ chain: [CERT] });
+    const oversized = post("/ct/v1/add-chain", json);
+    oversized.headers.set("Content-Length", "1001");
+    const rejected = await limited.fetch(oversized);
+    assert.equal(rejected.headers.get("X-CTreq-Reject"), "body-too-large");
+    assert.equal(rootsFetches.length, 0);
+    assert.equal(oversized.bodyUsed, false);
     assert.equal((await limited.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(1000 - json.length)))).status, 200);
     const res = await limited.fetch(postStream("/ct/v1/add-chain", json + " ".repeat(1001 - json.length)));
     assert.equal(res.headers.get("X-CTreq-Reject"), "body-too-large");

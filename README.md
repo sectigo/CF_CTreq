@@ -111,7 +111,7 @@ In the `sunlight` and `common` environments, rejection responses (other than `40
 
 #### body-too-large
 
-`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`, though its handlers also limit every `POST` body to 512 KiB, so a larger setting has no effect), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
+`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read or roots are fetched, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`, though its handlers also limit every `POST` body to 512 KiB, so a larger setting has no effect), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
 
 #### invalid-json
 
