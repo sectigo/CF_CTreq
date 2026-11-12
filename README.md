@@ -269,7 +269,7 @@ Requires Node.js 18 or later (no dependencies):
 npm test
 ```
 
-The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 18, the current LTS version and the latest version. Besides checking behaviour, they check the minified file's size and the snippet's execution time against a Snippet's [limits](#limits). To run the same behaviour tests against the minified code, including checking that the generated file matches the current source and minifier settings:
+The test output groups related checks into named suites, roughly following the request-validation flow. The tests also run on [GitHub Actions](.github/workflows/test.yml) for every push and pull request, in each [origin environment](#origin-environment), on Node.js 18, the current LTS version and the latest version. Besides checking behaviour, they check the minified file's size and the snippet's execution time against a Snippet's [limits](#limits). To run the same behaviour tests against the minified code, including checking that the generated file matches the current source and minifier settings:
 
 ```
 npm ci
