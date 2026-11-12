@@ -15,7 +15,10 @@ async function loadSnippet(environment) {
   return (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
 }
 const ENVIRONMENT = process.env.CTREQ_ENVIRONMENT || SOURCE.match(CONFIG_ENVIRONMENT)[2];
-const snippet = process.env.CTREQ_ENVIRONMENT ? await loadSnippet(ENVIRONMENT) : (await import("../cf_ctreq.js")).default;
+// The loaded module is never modified: loading the same environment again returns it from
+// Node's module cache. Tests use `snippet`, which the wrappers below may replace.
+const localSnippet = process.env.CTREQ_ENVIRONMENT ? await loadSnippet(ENVIRONMENT) : (await import("../cf_ctreq.js")).default;
+let snippet = localSnippet;
 // Returns the expected value for the environment under test.
 const expected = (byEnvironment) => {
   assert.ok(Object.hasOwn(byEnvironment, ENVIRONMENT), `no expectation for environment ${ENVIRONMENT}`);
@@ -30,22 +33,21 @@ const streamed = new WeakSet();
 // With CTREQ_LOG_URL set (e.g. https://ct.example.com/2026h1), requests that the local snippet
 // rejects are also sent to that deployed log, which must reject them identically. Anything the
 // snippet would forward is skipped, so nothing is ever submitted to the log.
+// Tests of requests to other logs than the deployed one use localSnippet instead.
 const networkFetch = globalThis.fetch;
-// The snippet without that, for tests of requests to other logs than the deployed one.
-const localSnippet = { fetch: snippet.fetch.bind(snippet) };
 if (process.env.CTREQ_LOG_URL) {
   const base = new URL(process.env.CTREQ_LOG_URL);
   let liveTest;
   beforeEach((t) => {
     liveTest = t;
   });
-  const local = snippet.fetch;
-  snippet.fetch = async (req) => {
+  const local = snippet;
+  const live = async (req) => {
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
     // Copy the body before the snippet reads it: in Node, a clone can't be read once its
     // twin has been cancelled part-way, as the snippet does with an oversized body.
     const bytes = hasBody ? new Uint8Array(await req.clone().arrayBuffer()) : null;
-    const localRes = await local.call(snippet, req);
+    const localRes = await local.fetch(req);
     const reason = localRes.headers.get("X-CTreq-Reject");
     if (reason === null) {
       liveTest.diagnostic(`not sent to the log (it would be forwarded): ${req.method} ${new URL(req.url).pathname}`);
@@ -73,6 +75,7 @@ if (process.env.CTREQ_LOG_URL) {
     liveTest.diagnostic(`sent to the log: ${req.method} ${url} => ${liveRes.status} ${reason}`);
     return liveRes;
   };
+  snippet = { fetch: live };
 }
 
 // Print each submitted chain as decoded by openssl under `npm test --verbose` (npm sets
@@ -108,8 +111,8 @@ if (process.env.CTREQ_VERBOSE || ["verbose", "silly"].includes(process.env.npm_c
     const r = spawnSync("openssl", ["x509", "-inform", "DER", "-text", "-noout", "-certopt", "no_pubkey,no_sigdump"], { input: Buffer.from(entry, "base64") });
     return r.status === 0 ? r.stdout.toString().trimEnd() : describeFailure(entry, r.stderr?.toString().trim() || r.error?.message);
   };
-  const realFetch = snippet.fetch;
-  snippet.fetch = async (req) => {
+  const inner = snippet;
+  const verbose = async (req) => {
     const out = [`${req.method} ${new URL(req.url).pathname}`];
     let chain;
     try {
@@ -125,11 +128,12 @@ if (process.env.CTREQ_VERBOSE || ["verbose", "silly"].includes(process.env.npm_c
       if (!shown.has(entry)) out.push(decode(entry));
       shown.add(entry);
     }
-    const res = await realFetch.call(snippet, req);
+    const res = await inner.fetch(req);
     out.push(`=> ${res.status} ${res.headers.get("X-CTreq-Reject") ?? "forwarded"}`);
     pending.push(out.join("\n"));
     return res;
   };
+  snippet = { fetch: verbose };
 }
 
 let forwarded;
