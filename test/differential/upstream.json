@@ -3,7 +3,7 @@
     {
       "repository": "transparency-dev/tesseract",
       "branch": "main",
-      "reviewed": "c6ca129cc1840562df3ed5143c6cc196ef7b07cf",
+      "reviewed": "224260de29918b193c7945b4dd88b2e6b797cd1f",
       "files": {
         "internal/ct/handlers.go": "d71c082bf34f694e2ff69aa58a95e125f3984782",
         "internal/ct/chain_validation.go": "f8ba27c6256bb0d45024bb2b43594b8c06413517",
@@ -18,10 +18,10 @@
     {
       "repository": "FiloSottile/sunlight",
       "branch": "main",
-      "reviewed": "3d3e6478a9094573cd84b88c3dd2e7dc39a811b8",
+      "reviewed": "5eed85d78c103401df28e6d08dce225d984b7b52",
       "files": {
         "internal/ctlog/http.go": "8fdee358542429bd456e68fc89570221a3abe9d0",
-        "go.mod": "88cd6f04d1c135707ff96ec758c8fc44b8067c58"
+        "go.mod": "0318e627e019ac1ff7c696cfa5c8fd1224e136ae"
       }
     },
     {
