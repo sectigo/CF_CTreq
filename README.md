@@ -358,7 +358,7 @@ It sends the log one of Google's CT log monitoring certificates, with its interm
 CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:resubmit
 ```
 
-It fails if Cloudflare fails the snippet (e.g. with error 1201) for any of them, or if the snippet rejects any of them, as the log has already accepted them all; it also reports the log's responses.  The log already has the entries, so it returns their existing SCTs rather than adding entries, although TesseraCT's deduplication is best-effort, so a static-ct-api log might occasionally record a duplicate (which CT allows).  A static-ct-api log is read from its monitoring URL in Google's log list; for one that isn't listed, set `CTREQ_LOG_MONITORING_URL` too:
+It fails if Cloudflare fails the snippet (e.g. with error 1201) for any of them, if any of them gets another server error, or if the snippet rejects any of them, as the log has already accepted them all; it also reports the log's responses.  Such failures may only affect some of the requests (e.g. only those handled by a copy of the snippet that hasn't yet cached the log's roots), so resubmitting many entries is more likely to find them than sending one.  The log already has the entries, so it returns their existing SCTs rather than adding entries, although TesseraCT's deduplication is best-effort, so a static-ct-api log might occasionally record a duplicate (which CT allows).  A static-ct-api log is read from its monitoring URL in Google's log list; for one that isn't listed, set `CTREQ_LOG_MONITORING_URL` too:
 
 ```
 CTREQ_LOG_URL=https://standee.sub.ctlabs.sectigo.com CTREQ_LOG_MONITORING_URL=https://standee.mon.ctlabs.sectigo.com npm run test:resubmit

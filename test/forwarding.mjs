@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { GOOGLE_MONITOR_LEAF, GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT } from "./google-monitor.mjs";
+import { cloudflareError, describeBody } from "./cloudflare.mjs";
 
 if (!process.env.CTREQ_LOG_URL) {
   console.error("Usage: CTREQ_LOG_URL=<production log URL> npm run test:forwarding, e.g. CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com");
@@ -50,8 +51,8 @@ test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
 
   const res = await fetch(endpoint("add-chain"), { method: "POST", headers: { "Content-Type": "application/json" }, body, redirect: "manual" });
   const text = (await res.text()).trim();
-  t.diagnostic(`sent to the log: POST ${endpoint("add-chain")} => ${res.status} ${text.slice(0, 200)}`);
-  assert.doesNotMatch(text, /error code: 12\d\d/, `Cloudflare failed the snippet: ${res.status} ${text}`);
+  t.diagnostic(`sent to the log: POST ${endpoint("add-chain")} => ${res.status} ${describeBody(text)}`);
+  assert.equal(cloudflareError(text), null, `Cloudflare failed the snippet: ${res.status} error ${cloudflareError(text)}`);
   assert.equal(res.headers.get("X-CTreq-Reject"), null, "the deployed snippet rejected a request that the local snippet forwards");
-  assert.equal(res.status, 400, `expected the log's own rejection of the corrupted signature, but got ${res.status} ${text.slice(0, 200)}`);
+  assert.equal(res.status, 400, `expected the log's own rejection of the corrupted signature, but got ${res.status} ${describeBody(text)}`);
 });
