@@ -334,3 +334,11 @@ CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com CTREQ_ENVIRONMENT=trillian npm 
 ```
 
 Each request that the local snippet rejects is then also sent to that URL, which must answer with the same status and `X-CTreq-Reject` reason.  Requests that the snippet would forward to the origin are never sent, so nothing is submitted to the log; those cases are only checked locally, and each test reports which requests were sent.  Only the paths under the base URL ending in `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` are used.
+
+To check that the snippet deployed in front of a production log can forward requests at all, run [`test/forwarding.mjs`](test/forwarding.mjs) with the log's base URL:
+
+```
+npm run test:forwarding -- https://tiger2027h1.ct.sectigo.com
+```
+
+Cloudflare fails a request with error 1201 ("Snippet tried to continue to origin multiple times") if a snippet makes more than one request to the origin.  This sends the log one of Google's CT log monitoring certificates, with its intermediate and root, but with the certificate's signature corrupted: the snippet forwards it, and the log itself rejects it, so nothing is logged.  It passes only if the log answers with its own `400 Bad Request`.  Only production logs accept Google's monitoring root, so it first checks the log's `get-roots`, and fails without sending anything if the root isn't there.
