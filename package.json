@@ -12,6 +12,7 @@
     "build": "terser cf_ctreq.js --config-file terser.config.json --output cf_ctreq.min.js",
     "test": "node --test test/cf_ctreq.test.js",
     "test:minified": "CTREQ_MINIFIED=1 node --test test/cf_ctreq.test.js",
+    "test:forwarding": "node test/forwarding.mjs",
     "test:differential": "node test/differential/run.mjs",
     "test:replay": "node test/differential/run.mjs --replay"
   },
