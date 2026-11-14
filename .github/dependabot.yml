@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+
+  # The origin models used by the differential tests.
+  - package-ecosystem: gomod
+    directory: /test/differential/origins
+    schedule:
+      interval: weekly
+    ignore:
+      # Its versions are those that the origins use (see test/differential/versions.json),
+      # which the origin drift workflow tracks.
+      - dependency-name: github.com/google/certificate-transparency-go
+    groups:
+      gomod:
+        patterns: ["*"]

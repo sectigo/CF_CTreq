@@ -89,7 +89,7 @@ if (replaying) {
 const work = mkdtempSync(join(tmpdir(), "ctreq-differential-"));
 const corpusFile = join(work, "corpus.jsonl");
 writeFileSync(corpusFile, corpus.map((item) => JSON.stringify(item)).join("\n") + "\n");
-console.log(`Origin models: TesseraCT (Go ${spawnSync("go", ["env", "GOVERSION"], { encoding: "utf8" }).stdout.trim()} crypto/x509), Sunlight (certificate-transparency-go ${sunlightVersion}), Trillian (certificate-transparency-go ${trillianVersion}).`);
+console.log(`Origin models: TesseraCT (Go ${spawnSync("go", ["env", "GOVERSION"], { cwd: join(here, "origins"), encoding: "utf8" }).stdout.trim()} crypto/x509), Sunlight (certificate-transparency-go ${sunlightVersion}), Trillian (certificate-transparency-go ${trillianVersion}).`);
 
 const verdicts = {};
 if (sunlightVersion === trillianVersion) {
