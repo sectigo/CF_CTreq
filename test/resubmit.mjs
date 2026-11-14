@@ -13,6 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { recentEntries } from "./differential/replay.mjs";
+import { cloudflareError, describeBody } from "./cloudflare.mjs";
 
 const COUNT = 256;
 const CONCURRENCY = 4;
@@ -36,7 +37,7 @@ test(`the log's last ${COUNT} entries, resubmitted to ${log.href}, reach the log
         const url = new URL(log.pathname.replace(/\/$/, "") + `/ct/v1/${endpoint}`, log);
         const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body, redirect: "manual" });
         const text = (await res.text()).trim();
-        results.push({ index, endpoint, status: res.status, reject: res.headers.get("X-CTreq-Reject"), cloudflare: text.match(/error code: (12\d\d)/)?.[1], text });
+        results.push({ index, endpoint, status: res.status, reject: res.headers.get("X-CTreq-Reject"), cloudflare: cloudflareError(text), text });
       }
     }),
   );
@@ -48,11 +49,13 @@ test(`the log's last ${COUNT} entries, resubmitted to ${log.href}, reach the log
   }
   t.diagnostic(`resubmitted ${results.length} entries (indexes ${Math.min(...results.map((r) => r.index))}-${Math.max(...results.map((r) => r.index))}): ` + Object.entries(counts).map(([o, c]) => `${c} ${o}`).join(", "));
   for (const r of results.filter((r) => !r.cloudflare && !r.reject && r.status !== 200).slice(0, 5)) {
-    t.diagnostic(`entry ${r.index} (${r.endpoint}): ${r.status} ${r.text.slice(0, 200)}`);
+    t.diagnostic(`entry ${r.index} (${r.endpoint}): ${r.status} ${describeBody(r.text)}`);
   }
 
   const failed = results.filter((r) => r.cloudflare);
-  assert.equal(failed.length, 0, `Cloudflare failed the snippet for ${failed.length} of ${results.length} entries, e.g. entry ${failed[0]?.index}: ${failed[0]?.status} ${failed[0]?.text}`);
+  assert.equal(failed.length, 0, `Cloudflare failed the snippet for ${failed.length} of ${results.length} entries, e.g. entry ${failed[0]?.index}: ${failed[0]?.status} error ${failed[0]?.cloudflare}`);
+  const errors = results.filter((r) => r.status >= 500);
+  assert.equal(errors.length, 0, `${errors.length} of ${results.length} entries got a server error, e.g. entry ${errors[0]?.index}: ${errors[0]?.status} ${describeBody(errors[0]?.text ?? "")}`);
   const rejected = results.filter((r) => r.reject);
   assert.equal(rejected.length, 0, `the snippet rejected ${rejected.length} entries that the log has already accepted, e.g. entry ${rejected[0]?.index} (${rejected[0]?.reject})`);
 });
