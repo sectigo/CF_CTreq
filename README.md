@@ -1,12 +1,5 @@
-# CF_CTreq
-
-[![Tests](https://github.com/sectigo/CF_CTreq/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sectigo/CF_CTreq/actions/workflows/test.yml)
-[![Differential tests](https://github.com/sectigo/CF_CTreq/actions/workflows/differential.yml/badge.svg?branch=main)](https://github.com/sectigo/CF_CTreq/actions/workflows/differential.yml)
-[![Origin drift](https://github.com/sectigo/CF_CTreq/actions/workflows/drift.yml/badge.svg?branch=main)](https://github.com/sectigo/CF_CTreq/actions/workflows/drift.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sectigo/CF_CTreq/badge)](https://scorecard.dev/viewer/?uri=github.com/sectigo/CF_CTreq)
-[![Release](https://img.shields.io/github/v/release/sectigo/CF_CTreq)](https://github.com/sectigo/CF_CTreq/releases/latest)
-[![License: GPL-3.0](https://img.shields.io/github/license/sectigo/CF_CTreq)](LICENSE)
-[![Cloudflare Snippet](https://img.shields.io/badge/Cloudflare-Snippet-F38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/rules/snippets/)
+# CF_CTreq [![Tests](https://github.com/sectigo/CF_CTreq/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sectigo/CF_CTreq/actions/workflows/test.yml) [![Differential tests](https://github.com/sectigo/CF_CTreq/actions/workflows/differential.yml/badge.svg?branch=main)](https://github.com/sectigo/CF_CTreq/actions/workflows/differential.yml) [![Origin drift](https://github.com/sectigo/CF_CTreq/actions/workflows/drift.yml/badge.svg?branch=main)](https://github.com/sectigo/CF_CTreq/actions/workflows/drift.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sectigo/CF_CTreq/badge)](https://scorecard.dev/viewer/?uri=github.com/sectigo/CF_CTreq) [![Release](https://img.shields.io/github/v/release/sectigo/CF_CTreq)](https://github.com/sectigo/CF_CTreq/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/github/license/sectigo/CF_CTreq)](LICENSE) [![Cloudflare Snippet](https://img.shields.io/badge/Cloudflare-Snippet-F38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/rules/snippets/)
 
 ## Contents
 
@@ -28,6 +21,7 @@
 - [Testing](#testing)
   - [Differential tests](#differential-tests)
   - [Testing a deployed log](#testing-a-deployed-log)
+    - [Rejections](#rejections), [Forwarding](#forwarding), [Resubmission](#resubmission)
 
 ## What is it?
 
@@ -327,18 +321,46 @@ If any of these fails, the workflow opens an issue.  After reviewing upstream ch
 
 ### Testing a deployed log
 
-To check a deployed snippet end to end, set `CTREQ_LOG_URL` to the log's base URL (including any path prefix such as a shard name), and `CTREQ_ENVIRONMENT` to the environment that the deployed snippet uses for that log (from `CONFIG.logEnvironments`, or else `CONFIG.environment`), e.g. `trillian` for Sectigo's Tiger:
+Three checks send requests to a deployed snippet, and so to the log behind it.  Each needs `CTREQ_LOG_URL` set to the log's base URL (including any path prefix such as a shard name), and is only run when requested:
+
+| Check | Command | Checks that | Sends to the log | Logs |
+|---|---|---|---|---|
+| [Rejections](#rejections) | `npm test` with `CTREQ_LOG_URL` and `CTREQ_ENVIRONMENT` set | the deployed snippet rejects requests exactly as the local one does | only requests that the snippet rejects | any |
+| [Forwarding](#forwarding) | `npm run test:forwarding` | the snippet can forward a request at all | one request that the log itself rejects | production only |
+| [Resubmission](#resubmission) | `npm run test:resubmit` | the snippet forwards real submissions | up to 256 of the log's own entries, which it already has | any |
+
+Cloudflare fails a request with error 1201 ("Snippet tried to continue to origin multiple times") if a snippet makes more than one request to the origin, which only the forwarding and resubmission checks can detect.  Before enabling a new version of the snippet in front of production logs, run the resubmission check against a test log with it enabled, then the forwarding and resubmission checks against a production log as soon as it is enabled there.
+
+#### Rejections
+
+Set `CTREQ_ENVIRONMENT` to the environment that the deployed snippet uses for the log (from `CONFIG.logEnvironments`, or else `CONFIG.environment`), e.g. `trillian` for Sectigo's Tiger:
 
 ```
 CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com CTREQ_ENVIRONMENT=trillian npm test
 ```
 
-Each request that the local snippet rejects is then also sent to that URL, which must answer with the same status and `X-CTreq-Reject` reason.  Requests that the snippet would forward to the origin are never sent, so nothing is submitted to the log; those cases are only checked locally, and each test reports which requests were sent.  Only the paths under the base URL ending in `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` are used.
+Each request that the local snippet rejects is then also sent to the log, which must answer with the same status and `X-CTreq-Reject` reason.  Requests that the snippet would forward to the origin are never sent, so nothing is submitted to the log; those cases are only checked locally, and each test reports which requests were sent.  Only the paths under the base URL ending in `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` are used.
 
-To check that the snippet deployed in front of a production log can forward requests at all, run [`test/forwarding.mjs`](test/forwarding.mjs) with the log's base URL:
+#### Forwarding
+
+[`test/forwarding.mjs`](test/forwarding.mjs) checks that the snippet deployed in front of a production log can forward a request:
 
 ```
-npm run test:forwarding -- https://tiger2027h1.ct.sectigo.com
+CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:forwarding
 ```
 
-Cloudflare fails a request with error 1201 ("Snippet tried to continue to origin multiple times") if a snippet makes more than one request to the origin.  This sends the log one of Google's CT log monitoring certificates, with its intermediate and root, but with the certificate's signature corrupted: the snippet forwards it, and the log itself rejects it, so nothing is logged.  It passes only if the log answers with its own `400 Bad Request`.  Only production logs accept Google's monitoring root, so it first checks the log's `get-roots`, and fails without sending anything if the root isn't there.
+It sends the log one of Google's CT log monitoring certificates, with its intermediate and root, but with the certificate's signature corrupted: the snippet forwards it, and the log itself rejects it, so nothing is logged.  It passes only if the log answers with its own `400 Bad Request`.  Only production logs accept Google's monitoring root, so it first checks the log's `get-roots`, and fails without sending anything if the root isn't there.
+
+#### Resubmission
+
+[`test/resubmit.mjs`](test/resubmit.mjs) checks that the deployed snippet forwards real submissions.  It fetches the log's last (up to) 256 entries, and resubmits each one to the same log, as the `add-chain` or `add-pre-chain` request that could have submitted it:
+
+```
+CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:resubmit
+```
+
+It fails if Cloudflare fails the snippet (e.g. with error 1201) for any of them, or if the snippet rejects any of them, as the log has already accepted them all; it also reports the log's responses.  The log already has the entries, so it returns their existing SCTs rather than adding entries, although TesseraCT's deduplication is best-effort, so a static-ct-api log might occasionally record a duplicate (which CT allows).  A static-ct-api log is read from its monitoring URL in Google's log list; for one that isn't listed, set `CTREQ_LOG_MONITORING_URL` too:
+
+```
+CTREQ_LOG_URL=https://standee.sub.ctlabs.sectigo.com CTREQ_LOG_MONITORING_URL=https://standee.mon.ctlabs.sectigo.com npm run test:resubmit
+```

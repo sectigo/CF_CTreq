@@ -8,19 +8,17 @@
 // rejects it, so nothing is logged. It passes only if the log answers with its own 400.
 // Only production logs accept Google's monitoring root, so the log's get-roots is checked first.
 //
-// Usage: npm run test:forwarding -- <log URL>
-//   e.g. npm run test:forwarding -- https://tiger2027h1.ct.sectigo.com
+// Usage: CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:forwarding
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { GOOGLE_MONITOR_LEAF, GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT } from "./google-monitor.mjs";
 
-const [logArg] = process.argv.slice(2);
-if (!logArg) {
-  console.error("Usage: npm run test:forwarding -- <log URL>, e.g. https://tiger2027h1.ct.sectigo.com");
+if (!process.env.CTREQ_LOG_URL) {
+  console.error("Usage: CTREQ_LOG_URL=<production log URL> npm run test:forwarding, e.g. CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com");
   process.exit(2);
 }
-const log = new URL(logArg);
+const log = new URL(process.env.CTREQ_LOG_URL);
 const endpoint = (name) => new URL(log.pathname.replace(/\/$/, "") + "/ct/v1/" + name, log);
 
 test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
