@@ -177,6 +177,17 @@ export async function replay({ entries = Number(process.env.CTREQ_REPLAY_ENTRIES
   return { items: results.flat(), logs: logs.length, failed };
 }
 
+// Returns the requests ({index, endpoint, body}) for the last `count` entries of the log whose
+// submission URL is `url`: a static-ct-api log is read from `monitoringUrl` or else from its
+// monitoring URL in the log list, and any other log is read as an RFC 6962 log at `url`.
+export async function recentEntries(url, count, monitoringUrl) {
+  const slash = (u) => (u.endsWith("/") ? u : u + "/");
+  if (monitoringUrl) return staticEntries(slash(monitoringUrl), count);
+  const list = await get(LOG_LIST);
+  const tiled = list.operators.flatMap((op) => op.tiled_logs ?? []).find((l) => slash(l.submission_url) === slash(url));
+  return tiled ? staticEntries(slash(tiled.monitoring_url), count) : rfc6962Entries(slash(url), count);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { items, failed } = await replay();
   for (const item of items) process.stdout.write(JSON.stringify(item) + "\n");
