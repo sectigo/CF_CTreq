@@ -20,6 +20,7 @@
   - [Grafana](#grafana)
 - [Testing](#testing)
   - [Differential tests](#differential-tests)
+  - [Running the snippet locally](#running-the-snippet-locally)
   - [Testing a deployed log](#testing-a-deployed-log)
     - [Rejections](#rejections), [Forwarding](#forwarding), [Resubmission](#resubmission)
 
@@ -348,6 +349,23 @@ node test/differential/upstream.mjs
 ```
 
 If any of these fails, the workflow opens an issue.  After reviewing upstream changes (and updating the snippet, the origin models or `versions.json` if necessary), record them with `node test/differential/upstream.mjs --update`.
+
+### Running the snippet locally
+
+Cloudflare's [Wrangler](https://developers.cloudflare.com/workers/wrangler/) can run the snippet on your own machine, in Cloudflare's Workers runtime, in front of a real log (it needs no Cloudflare account in this mode):
+
+```
+npm run build
+npx wrangler dev cf_ctreq.min.js --compatibility-date=2026-11-01 --local-upstream tiger2027h1.ct.sectigo.com --upstream-protocol https
+```
+
+Requests to `http://localhost:8787` then go through the snippet, which forwards those that it doesn't reject to the log, e.g.:
+
+```
+curl -X POST --data 'not json' http://localhost:8787/ct/v1/add-chain
+```
+
+The snippet sees the log's hostname, so `CONFIG.logEnvironments` applies as it would when deployed.  But Wrangler runs it as a Worker, so the limits that only apply to Snippets (such as their CPU time limit, and error 1201 for more than one request to the origin) aren't enforced: check those against a deployed snippet (see below).  Requests that the snippet forwards are real submissions to the log.  Wrangler keeps its local state in `.wrangler/`, which Git ignores.
 
 ### Testing a deployed log
 
