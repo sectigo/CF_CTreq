@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { GOOGLE_MONITOR_LEAF, GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT } from "./google-monitor.mjs";
 import { cloudflareError, describeBody } from "./cloudflare.mjs";
+import { certificatesIn, rootsHashList } from "../tools/roots-hashes.mjs";
 
 if (!process.env.CTREQ_LOG_URL) {
   console.error("Usage: CTREQ_LOG_URL=<production log URL> npm run test:forwarding, e.g. CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com");
@@ -32,13 +33,15 @@ test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
   leaf[leaf.length - 1] ^= 0xff;
   const body = JSON.stringify({ chain: [leaf.toString("base64"), GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT] });
 
-  // The local snippet, with its own configuration for this log and the log's roots, must forward it.
+  // The local snippet, with its own configuration for this log and the log's roots (if it
+  // has a roots URL), must forward it.
+  const rootsList = rootsHashList(certificatesIn(rootsText));
   const source = readFileSync(new URL("../cf_ctreq.js", import.meta.url), "utf8");
   const local = (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
   const networkFetch = globalThis.fetch;
   let forwarded = false;
   globalThis.fetch = async (req) => {
-    if (!(req instanceof Request)) return new Response(rootsText);
+    if (!(req instanceof Request)) return new Response(rootsList);
     forwarded = true;
     return new Response(null, { status: 200 });
   };

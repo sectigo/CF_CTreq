@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { tlv, seq, ctOid, OID_EKU, ext, POISON_EXT, makeCert, b64, makeCA, der, CERT, PRECERT, NONCRITICAL, ISSUER } from "./der.mjs";
+import { ROOTS_HEADER, certificatesIn, rootsHashList } from "../tools/roots-hashes.mjs";
 
 // CTREQ_ENVIRONMENT selects CONFIG.environment ("sunlight", "tesseract", "trillian", or "common")
 // for the snippet under test; by default, the snippet's own setting is tested. Another
@@ -148,11 +149,14 @@ if (process.env.CTREQ_VERBOSE || ["verbose", "silly"].includes(process.env.npm_c
   snippet = { fetch: verbose };
 }
 
-// The snippet's get-roots requests ({ url, init }) are answered by getRoots(url), which
-// by default lists ISSUER, the issuer of all the other fixtures, as the only root.
+// The snippet's requests for roots ({ url, init }) are answered by getRoots(url), which by
+// default lists ISSUER, the issuer of all the other fixtures, as the only root. Lists of
+// roots are made by tools/roots-hashes.mjs, so these tests also check that its hashes match
+// the snippet's.
 let forwarded;
 let rootsFetches;
-const rootsResponse = (...roots) => Response.json({ certificates: roots });
+const rootsList = (...roots) => rootsHashList(roots.map((root) => Buffer.from(root, "base64")));
+const rootsResponse = (...roots) => new Response(rootsList(...roots));
 let getRoots;
 beforeEach(() => {
   forwarded = null;
@@ -207,9 +211,24 @@ const postBytes = (path, bytes) =>
 const ca = (subject, issuer = subject) => b64(makeCert({ subject: Buffer.from(subject), issuer }));
 // The DER subject name of makeCert({ subject }), as the snippet compares it.
 const nameDer = (cn) => seq(tlv(0x31, seq(tlv(0x06, [0x55, 0x04, 0x03]), tlv(0x0c, Buffer.from(cn))))).toString("latin1");
-// These tests use a fresh snippet, with an empty cache of roots, and are never sent to a deployed log.
-const freshSnippet = () => loadSnippet(ENVIRONMENT);
 const NULL = [0x05, 0x00];
+
+// Each test log's roots URL, a copy of its get-roots response on another hostname, and the
+// log that a roots URL is for.
+const rootsUrlFor = (log) => `https://roots.example.net/${log}/get-roots`;
+const logOf = (rootsUrl) => decodeURIComponent(new URL(rootsUrl).pathname.split("/")[1]);
+const LOG_ENVIRONMENTS = /^(\s*logEnvironments: )\[[\s\S]*?\n  \],$/m;
+assert.match(SOURCE, LOG_ENVIRONMENTS, "cf_ctreq.js must set CONFIG.logEnvironments to a multi-line array");
+// A snippet with the given CONFIG.logEnvironments (as source code), in the given environment.
+const logEnvironmentsSnippet = (logEnvironments, environment = ENVIRONMENT) =>
+  loadSource(SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`).replace(LOG_ENVIRONMENTS, `$1${logEnvironments},`));
+// A fresh snippet whose CONFIG.logEnvironments gives each of the given logs (hostnames,
+// optionally followed by a path) logEnvironment and its roots URL, rootsUrlFor(log), with
+// environment as the default. These tests are never sent to a deployed log.
+const rootsSnippet = (logs = ["log.example.com"], { environment = ENVIRONMENT, logEnvironment = environment } = {}) => {
+  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  return logEnvironmentsSnippet(`[${logs.map((log) => `[/^${escape(log)}\\//, ${JSON.stringify(logEnvironment)}, ${JSON.stringify(rootsUrlFor(log))}]`).join(", ")}]`, environment);
+};
 
 // Cloudflare limits a Snippet's CPU time, not its elapsed time, so this returns the least
 // CPU time, in ms, that Node's main thread takes for run(prepare(i)) over several runs, so
@@ -303,7 +322,7 @@ describe("Body size and forwarding", () => {
   });
 
   test("oversized Content-Length is rejected without fetching roots", async () => {
-    const s = await freshSnippet();
+    const s = await rootsSnippet();
     for (const endpoint of ["add-chain", "add-pre-chain"]) {
       const req = post(`/ct/v1/${endpoint}`, { chain: [CERT, ISSUER] });
       req.headers.set("Content-Length", String(MAX_BODY + 1));
@@ -324,17 +343,17 @@ describe("Body size and forwarding", () => {
   });
 
   test("Content-Length at the limit still fetches roots", async () => {
-    const s = await freshSnippet();
+    const s = await rootsSnippet();
     const req = post("/ct/v1/add-chain", { chain: [CERT, ISSUER] });
     req.headers.set("Content-Length", String(MAX_BODY));
     const res = await s.fetch(req);
     assert.equal(res.status, 200);
     assert.equal(rootsFetches.length, 1);
-    assert.equal(rootsFetches[0].url, "https://log.example.com/ct/v1/get-roots");
+    assert.equal(rootsFetches[0].url, rootsUrlFor("log.example.com"));
   });
 
   test("a log-specific environment determines the Content-Length limit before fetching roots", async () => {
-    const s = await loadSnippet("sunlight");
+    const s = await rootsSnippet(["tiger2027h1.ct.sectigo.com"], { environment: "sunlight", logEnvironment: "trillian" });
     const certs = JSON.stringify({ chain: [CERT, ISSUER] });
     const maxLength = 128 * 1024;
     for (const [url, accepted] of [
@@ -347,11 +366,11 @@ describe("Body size and forwarding", () => {
       assert.equal(req.bodyUsed, accepted);
       assert.equal(rootsFetches.length, accepted ? 1 : 0);
     }
-    assert.equal(rootsFetches[0].url, "https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots");
+    assert.equal(rootsFetches[0].url, rootsUrlFor("tiger2027h1.ct.sectigo.com"));
   });
 
   test("fetching roots still overlaps reading a permitted body", async () => {
-    const s = await freshSnippet();
+    const s = await rootsSnippet();
     let startReading;
     const reading = new Promise((resolve) => { startReading = resolve; });
     let releaseBody;
@@ -505,13 +524,14 @@ describe("JSON and chain entries", () => {
   test("chains of more than 10 entries are forwarded without being checked", async () => {
     // Rejected with 10 entries, for an entry that isn't base64 and for not leading to a root.
     for (const [chain, reason] of [[[...Array(9).fill(CERT), "!!!"], "entry-not-base64"], [Array(10).fill(b64(makeCert({ issuer: "Unknown CA", subject: Buffer.from("Unknown CA") }))), "root-not-accepted"]]) {
-      let res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
+      const s = reason === "root-not-accepted" ? await rootsSnippet() : snippet;
+      let res = await s.fetch(post("/ct/v1/add-chain", { chain }));
       assert.equal(outcome(res), reason);
       // But forwarded byte for byte with 11, or many more.
       for (const extra of [[CERT], Array(1000).fill("!!!")]) {
         const body = JSON.stringify({ chain: [...chain, ...extra] });
         forwarded = null;
-        res = await snippet.fetch(post("/ct/v1/add-pre-chain", body));
+        res = await s.fetch(post("/ct/v1/add-pre-chain", body));
         assert.equal(outcome(res), "forwarded");
         assert.equal(forwarded.body, body);
       }
@@ -861,6 +881,50 @@ describe("Certificate and chain validation", () => {
 });
 
 describe("Accepted roots and caching", () => {
+  test("the accepted roots are only checked for logs that CONFIG.logEnvironments gives a roots URL", async () => {
+    const s = await logEnvironmentsSnippet(`[
+      [/^checked\\.example\\.com\\//, ${JSON.stringify(ENVIRONMENT)}, ${JSON.stringify(rootsUrlFor("checked.example.com"))}],
+      [/^empty\\.example\\.com\\//, ${JSON.stringify(ENVIRONMENT)}, ""],
+      [/^null\\.example\\.com\\//, ${JSON.stringify(ENVIRONMENT)}, null],
+      [/^omitted\\.example\\.com\\//, ${JSON.stringify(ENVIRONMENT)}],
+    ]`);
+    const unknownRoot = JSON.stringify({ chain: [b64(makeCert({ issuer: "Unknown CA" }))] });
+    // Logs that use CONFIG.environment (as no entry matches them) aren't checked either.
+    for (const log of ["empty", "null", "omitted", "default"]) {
+      const res = await s.fetch(new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: unknownRoot }));
+      assert.equal(outcome(res), "forwarded", log);
+    }
+    assert.equal(rootsFetches.length, 0);
+    const res = await s.fetch(new Request("https://checked.example.com/ct/v1/add-chain", { method: "POST", body: unknownRoot }));
+    assert.equal(outcome(res), "root-not-accepted");
+    assert.deepEqual(rootsFetches.map((f) => f.url), [rootsUrlFor("checked.example.com")]);
+  });
+
+  test("roots are never fetched from the log's own hostname, as Cloudflare would fail the forwarded request", async () => {
+    // Cloudflare fails a Snippet that makes more than one request to the origin (error 1201).
+    // A roots URL that the log's own pattern matches fails at deployment.
+    await assert.rejects(
+      logEnvironmentsSnippet('[[/^ct\\.example\\.com\\//, "trillian", "https://ct.example.com/2027h1/ct/v1/get-roots"]]'),
+      /CONFIG.logEnvironments\[0\]'s roots URL must be on another hostname than the log's/,
+    );
+    await assert.rejects(logEnvironmentsSnippet('[[/^ct\\.example\\.com\\//, "trillian", "roots.json"]]'), /CONFIG.logEnvironments\[0\]'s roots URL must be a URL, "" or null, not "roots.json"/);
+    // Otherwise, one on the requested hostname is ignored, and the roots aren't checked.
+    const s = await logEnvironmentsSnippet('[[/^ct\\.example\\.com\\/2027h1\\//, "trillian", "https://ct.example.com/roots.json"]]');
+    const res = await s.fetch(new Request("https://ct.example.com/2027h1/ct/v1/add-chain", { method: "POST", body: JSON.stringify({ chain: [b64(makeCert({ issuer: "Unknown CA" }))] }) }));
+    assert.equal(outcome(res), "forwarded");
+    assert.equal(rootsFetches.length, 0);
+  });
+
+  test("logs that share a roots URL share its cached roots", async () => {
+    const url = rootsUrlFor("shared");
+    const s = await logEnvironmentsSnippet(`[[/^ct\\.example\\.com\\//, ${JSON.stringify(ENVIRONMENT)}, ${JSON.stringify(url)}]]`);
+    for (const shard of ["2027h1", "2027h2"]) {
+      const res = await s.fetch(new Request(`https://ct.example.com/${shard}/ct/v1/add-chain`, { method: "POST", body: JSON.stringify({ chain: [CERT, ISSUER] }) }));
+      assert.equal(outcome(res), "forwarded", shard);
+    }
+    assert.deepEqual(rootsFetches.map((f) => f.url), [url]);
+  });
+
   test("chains rejected by every origin do not wait for roots", async () => {
     const badCert = b64(der(Array(160).fill(0xab)));
     const otherCA = b64(makeCert({ subject: Buffer.from("Other CA") }));
@@ -879,7 +943,7 @@ describe("Accepted roots and caching", () => {
       cases.push(["/ct/v1/add-pre-chain", [PRECERT, psc, ISSUER], "psc-not-supported"]);
     }
     for (const [path, chain, reason] of cases) {
-      const s = await freshSnippet();
+      const s = await rootsSnippet();
       let releaseRoots;
       getRoots = () => new Promise((resolve) => { releaseRoots = resolve; });
       const request = s.fetch(post(path, { chain }));
@@ -901,12 +965,12 @@ describe("Accepted roots and caching", () => {
   });
 
   test("common waits for roots when only some origins reject", async () => {
-    const s = await loadSnippet("common");
+    const s = await rootsSnippet(["accepted.example.com", "unaccepted.example.com", "unavailable.example.com"], { environment: "common" });
     // TesseraCT rejects the version; Sunlight and Trillian accept it.
     const chain = [b64(makeCert({ version: [3] })), ISSUER];
     for (const [host, roots, want] of [
       ["accepted", rootsResponse(ISSUER), "forwarded"],
-      ["unaccepted", rootsResponse(), "cert-unparseable"],
+      ["unaccepted", rootsResponse(ca("Other CA")), "cert-unparseable"],
       ["unavailable", new Response(null, { status: 503 }), "forwarded"],
     ]) {
       let releaseRoots;
@@ -931,12 +995,12 @@ describe("Accepted roots and caching", () => {
   });
 
   test("the chain must lead to an accepted root, whose subject is the issuer of any certificate in it", async () => {
-    const s = await freshSnippet();
+    const s = await rootsSnippet(["a", "b", "c", "x"].map((log) => `${log}.example.com`));
     // leaf <- A <- B, issued by C.
     const leaf = b64(makeCert({ issuer: "A" }));
     const chain = [leaf, ca("A", "B"), ca("B", "C")];
     const roots = { a: ca("A"), b: ca("B"), c: ca("C"), x: ca("X") };
-    getRoots = (url) => rootsResponse(roots[new URL(url).hostname.split(".")[0]]);
+    getRoots = (url) => rootsResponse(roots[logOf(url).split(".")[0]]);
     const check = async (log, chain) => outcome(await s.fetch(new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: JSON.stringify({ chain }) })));
     for (const [log, want] of Object.entries({ a: "forwarded", b: "forwarded", c: "forwarded", x: "root-not-accepted" })) {
       assert.equal(await check(log, chain), want, log);
@@ -956,7 +1020,7 @@ describe("Accepted roots and caching", () => {
   });
 
   test("once a certificate's issuer is an accepted root, no more are looked up", async () => {
-    const s = await freshSnippet();
+    const s = await rootsSnippet();
     const chain = [b64(makeCert({ issuer: "A" })), ca("A", "B"), ca("B", "C")];
     getRoots = () => rootsResponse(ca("A"), ca("B"), ca("C"));
     const submit = () => s.fetch(new Request("https://log.example.com/ct/v1/add-chain", { method: "POST", body: JSON.stringify({ chain }) }));
@@ -977,12 +1041,12 @@ describe("Accepted roots and caching", () => {
     assert.equal(bytes, nameDer("A").length * expected({ sunlight: 1, tesseract: 1, trillian: 1, common: 3 }));
   });
 
-  test("each log's roots are fetched from its get-roots endpoint and cached for CONFIG.rootsCacheSeconds", async () => {
-    const s = await freshSnippet();
+  test("each log's roots are fetched from its roots URL and cached for CONFIG.rootsCacheSeconds", async () => {
+    const s = await rootsSnippet(["ct.example.com/2027h1", "ct.example.com/2027h2", "other.example.com/2027h1"]);
     const submit = (url, chain = [CERT, ISSUER]) => s.fetch(new Request(url, { method: "POST", body: JSON.stringify({ chain }) }));
     await submit("https://ct.example.com/2027h1/ct/v1/add-chain");
     assert.equal(rootsFetches.length, 1);
-    assert.equal(rootsFetches[0].url, "https://ct.example.com/2027h1/ct/v1/get-roots");
+    assert.equal(rootsFetches[0].url, rootsUrlFor("ct.example.com/2027h1"));
     // Cloudflare caches it too, for at least a minute, unless it's an error.
     assert.deepEqual(rootsFetches[0].init, { cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": 60 } } });
     // The same log, by either endpoint, uses the cached roots.
@@ -992,7 +1056,7 @@ describe("Accepted roots and caching", () => {
     // Other logs have their own.
     await submit("https://ct.example.com/2027h2/ct/v1/add-chain");
     await submit("https://other.example.com/2027h1/ct/v1/add-chain");
-    assert.deepEqual(rootsFetches.slice(1).map((f) => f.url), ["https://ct.example.com/2027h2/ct/v1/get-roots", "https://other.example.com/2027h1/ct/v1/get-roots"]);
+    assert.deepEqual(rootsFetches.slice(1).map((f) => f.url), [rootsUrlFor("ct.example.com/2027h2"), rootsUrlFor("other.example.com/2027h1")]);
     // Fetched again once the cached roots expire.
     const now = Date.now;
     try {
@@ -1009,21 +1073,26 @@ describe("Accepted roots and caching", () => {
   });
 
   test("if the roots can't be fetched or read, chains aren't checked against them", async () => {
-    const s = await freshSnippet();
     const unknownRoot = [b64(makeCert({ issuer: "Unknown CA" }))];
-    const submit = (log) => s.fetch(new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: JSON.stringify({ chain: unknownRoot }) }));
+    const list = rootsList(ISSUER);
     const bad = {
       "not-found": () => new Response("404 page not found", { status: 404 }),
-      "server-error": () => Response.json({ certificates: [ISSUER] }, { status: 500 }),
-      "not-json": () => new Response("origin"),
+      "server-error": () => new Response(list, { status: 500 }),
+      "not-a-list": () => new Response("origin"),
       "empty-body": () => new Response(null),
-      "other-key": () => Response.json({ roots: [ISSUER] }),
-      "not-base64": () => Response.json({ certificates: [ISSUER, "!!!!"] }),
-      "escaped": () => new Response(`{"certificates":["\\u00${ISSUER.charCodeAt(0).toString(16)}${ISSUER.slice(1)}"]}`),
-      "not-a-cert": () => Response.json({ certificates: [ISSUER, b64(der(Array(160).fill(0xab)))] }),
-      // Valid, but more than 2 MiB, so not read in case it would take too long.
-      "too-large": () => new Response(JSON.stringify({ certificates: [ISSUER] }) + " ".repeat(2 * 1024 * 1024)),
+      "no-header": () => new Response(list.slice(list.indexOf("\n") + 1)),
+      "other-version": () => new Response(list.replace(ROOTS_HEADER, ROOTS_HEADER.replace("v1", "v2"))),
+      "get-roots-response": () => Response.json({ certificates: [ISSUER] }),
+      "short-hash": () => new Response(`${ROOTS_HEADER}\n1a2b3c4\n`),
+      "long-hash": () => new Response(`${ROOTS_HEADER}\n1a2b3c4d5\n`),
+      "not-hex": () => new Response(`${list}zzzzzzzz  CN=Z\n`),
+      // A list with no hashes (perhaps a truncated or blank file) would otherwise reject everything.
+      "no-hashes": () => new Response(`${ROOTS_HEADER}\n# No roots.\n`),
+      // Valid, but more than 256 KiB, so not read in case it would take too long.
+      "too-large": () => new Response(list + "#".repeat(256 * 1024) + "\n"),
     };
+    const s = await rootsSnippet([...Object.keys(bad), "unreachable"].map((log) => `${log}.example.com`));
+    const submit = (log) => s.fetch(new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: JSON.stringify({ chain: unknownRoot }) }));
     for (const [log, response] of Object.entries(bad)) {
       getRoots = response;
       assert.equal(outcome(await submit(log)), "forwarded", log);
@@ -1040,51 +1109,67 @@ describe("Accepted roots and caching", () => {
     getRoots = () => rootsResponse(ISSUER);
     assert.equal(outcome(await submit("unreachable")), "root-not-accepted");
     assert.equal(rootsFetches.length, Object.keys(bad).length + 2);
-
-    // A log with no roots accepts nothing.
-    getRoots = () => rootsResponse();
-    const res = await s.fetch(new Request("https://no-roots.example.com/ct/v1/add-chain", { method: "POST", body: JSON.stringify({ chain: [CERT, ISSUER] }) }));
-    assert.equal(outcome(res), "root-not-accepted");
   });
 
-  test("get-roots responses are read in any chunks, and roots in any form", async () => {
-    const s = await freshSnippet();
-    // A root whose subject ends past the prefix that is decoded first, and v1 roots.
-    const longName = "L".repeat(600);
-    const roots = [ca(longName), b64(makeCert({ version: null, subject: Buffer.from("V1 CA"), issuer: "V1 CA" })), ISSUER];
-    // As Go's json.Encoder writes it, with a final newline, sent one byte at a time.
-    const text = JSON.stringify({ certificates: roots }) + "\n";
-    getRoots = () => new Response(new ReadableStream({
-      start(controller) {
-        for (const byte of new TextEncoder().encode(text)) controller.enqueue(new Uint8Array([byte]));
-        controller.close();
-      },
-    }));
-    const check = async (chain) => outcome(await s.fetch(new Request("https://log.example.com/ct/v1/add-chain", { method: "POST", body: JSON.stringify({ chain }) })));
-    assert.equal(await check([b64(makeCert({ issuer: longName }))]), "forwarded");
-    assert.equal(await check([b64(makeCert({ issuer: "V1 CA" }))]), "forwarded");
-    assert.equal(await check([CERT]), "forwarded");
-    assert.equal(await check([b64(makeCert({ issuer: "L".repeat(599) }))]), "root-not-accepted");
-    assert.equal(rootsFetches.length, 1);
+  test("the list of roots is read in any chunks, in any order, with annotations, comments and either line ending", async () => {
+    const roots = [ca("A"), b64(makeCert({ version: null, subject: Buffer.from("V1 CA"), issuer: "V1 CA" })), ISSUER];
+    const [header, ...lines] = rootsList(...roots).trimEnd().split("\n");
+    assert.equal(header, ROOTS_HEADER);
+    const lists = {
+      generated: rootsList(...roots),
+      // Unsorted, with upper-case hashes, comments, blank lines, and either line ending.
+      edited: [`${header}  `, "# Accepted roots", "", ...lines.reverse().map((line, i) => (i % 2 ? line.toUpperCase() : line))].join("\r\n") + "\r\n",
+      // Hashes alone, without annotations or a final line break.
+      "hashes only": [header, ...lines.map((line) => line.slice(0, 8))].join("\n"),
+    };
+    for (const [name, text] of Object.entries(lists)) {
+      const s = await rootsSnippet();
+      rootsFetches = [];
+      // Sent one byte at a time.
+      getRoots = () => new Response(new ReadableStream({
+        start(controller) {
+          for (const byte of new TextEncoder().encode(text)) controller.enqueue(new Uint8Array([byte]));
+          controller.close();
+        },
+      }));
+      const check = async (chain) => outcome(await s.fetch(new Request("https://log.example.com/ct/v1/add-chain", { method: "POST", body: JSON.stringify({ chain }) })));
+      assert.equal(await check([b64(makeCert({ issuer: "A" }))]), "forwarded", name);
+      assert.equal(await check([b64(makeCert({ issuer: "V1 CA" }))]), "forwarded", name);
+      assert.equal(await check([CERT]), "forwarded", name);
+      assert.equal(await check([b64(makeCert({ issuer: "B" }))]), "root-not-accepted", name);
+      assert.equal(rootsFetches.length, 1, name);
+    }
+  });
+
+  test("tools/roots-hashes.mjs lists the same roots from a get-roots response or a PEM bundle", () => {
+    const roots = [ca("A"), ca("B", "A"), ISSUER];
+    const pem = roots.map((root) => `# A comment\n-----BEGIN CERTIFICATE-----\n${root.match(/.{1,64}/g).join("\n")}\n-----END CERTIFICATE-----\n`).join("");
+    const fromJson = certificatesIn(JSON.stringify({ certificates: roots }));
+    const fromPem = certificatesIn(pem);
+    assert.deepEqual(fromPem, fromJson);
+    const list = rootsHashList(fromJson, ["3 roots"]);
+    const [header, comment, ...lines] = list.trimEnd().split("\n");
+    assert.deepEqual([header, comment], [ROOTS_HEADER, "# 3 roots"]);
+    // Sorted by hash, each followed by the subject name.
+    assert.deepEqual(lines, [...lines].sort());
+    assert.deepEqual(lines.map((line) => line.slice(10)).sort(), ["CN=A", "CN=B", "CN=Test CA"]);
+    for (const line of lines) assert.match(line, /^[0-9a-f]{8}  CN=/);
   });
 
   test("hundreds of roots are read, and looked up, well within a Snippet's 5 ms limit", async () => {
-    const s = await freshSnippet();
-    // 700 roots of about 1,500 bytes, like the largest real get-roots responses (~1 MB).
-    const roots = Array.from({ length: 700 }, (_, i) =>
-      b64(makeCert({ subject: Buffer.from(`Root CA ${i} `.padEnd(120, "x")), issuer: `Root CA ${i} `.padEnd(120, "x"), extensions: [ext([0x2a, 0x03], false, Buffer.alloc(1000, i))] })));
-    const body = new TextEncoder().encode(JSON.stringify({ certificates: roots }));
-    assert.ok(body.length > 1_000_000, `${body.length} bytes`);
-    getRoots = () => new Response(body);
-    const chain = JSON.stringify({ chain: [b64(makeCert({ issuer: `Root CA 699 `.padEnd(120, "x") }))] });
+    const s = await rootsSnippet(["warm-up", ...Array.from({ length: 5 }, (_, i) => `miss${i}`)].map((log) => `${log}.example.com`));
+    // 700 roots, more than any real log accepts.
+    const names = Array.from({ length: 700 }, (_, i) => `Root CA ${i} `.padEnd(120, "x"));
+    const list = new TextEncoder().encode(rootsList(...names.map((name) => ca(name))));
+    getRoots = () => new Response(list);
+    const chain = JSON.stringify({ chain: [b64(makeCert({ issuer: names.at(-1) }))] });
     const request = (log) => new Request(`https://${log}.example.com/ct/v1/add-chain`, { method: "POST", body: chain });
     const submit = async (req) => assert.equal(outcome(await s.fetch(req)), "forwarded");
     await submit(request("warm-up"));
     // Each log's roots are read once, then cached.
     const miss = await fastest((i) => request(`miss${i}`), submit);
     const hit = await fastest(() => request("miss0"), submit);
-    // Generous, so as not to fail on a slow machine.
-    assert.ok(miss < 40, `reading the roots took ${miss.toFixed(1)} ms of CPU time`);
+    assert.ok(miss < 5, `reading the roots took ${miss.toFixed(1)} ms of CPU time`);
     assert.ok(hit < 5, `with cached roots, took ${hit.toFixed(1)} ms of CPU time`);
   });
 });
@@ -1116,12 +1201,7 @@ describe("Origin environments and rejection responses", () => {
   });
 
   test("CONFIG.logEnvironments selects the environment by hostname and path", async () => {
-    const LOG_ENVIRONMENTS = /^(\s*logEnvironments: )\[[\s\S]*?\n  \],$/m;
-    assert.match(SOURCE, LOG_ENVIRONMENTS, "cf_ctreq.js must set CONFIG.logEnvironments to a multi-line array");
-    const load = async (logEnvironments) => {
-      const source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(ENVIRONMENT)}`).replace(LOG_ENVIRONMENTS, `$1${logEnvironments},`);
-      return loadSource(source);
-    };
+    const load = (logEnvironments) => logEnvironmentsSnippet(logEnvironments);
     // OPTIONS is only answered by Sunlight, and an unknown version only rejected by TesseraCT.
     const v4 = b64(makeCert({ version: [3] }));
     const behaviour = async (s, base) => {
@@ -1166,7 +1246,7 @@ describe("Origin environments and rejection responses", () => {
       "https://other.example.com/2026h2/": null,
     });
     await assert.rejects(load('[[/tiger/, "ctfe"]]'), /CONFIG.logEnvironments\[0\]'s environment must be "sunlight", "tesseract", "trillian", or "common", not "ctfe"/);
-    await assert.rejects(load('[[/tiger/, "trillian"], ["tuscolo", "sunlight"]]'), /CONFIG.logEnvironments\[1\] must be a \[regular expression, environment\] pair/);
+    await assert.rejects(load('[[/tiger/, "trillian"], ["tuscolo", "sunlight"]]'), /CONFIG.logEnvironments\[1\] must be \[regular expression, environment\] or \[regular expression, environment, roots URL\]/);
   });
 
   test("every rejection carries an X-CTreq-Reject reason", async () => {
@@ -1195,7 +1275,7 @@ describe("Origin environments and rejection responses", () => {
       cases["psc-not-supported"] = post(PRE, { chain: [PRECERT, psc, ISSUER] });
     }
     for (const [reason, req] of Object.entries(cases)) {
-      const res = await snippet.fetch(req);
+      const res = await (reason === "root-not-accepted" ? await rootsSnippet() : snippet).fetch(req);
       assert.notEqual(res.status, 200, reason);
       assert.equal(res.headers.get("X-CTreq-Reject"), reason);
       assert.equal(res.headers.get("Content-Type"), "application/problem+json", reason);
