@@ -176,8 +176,10 @@ function decodedRoots(roots) {
 function logSettings(url) {
   const log = url.hostname + url.pathname;
   for (const settings of LOG_SETTINGS) {
-    // search() ignores lastIndex, so a pattern with the g or y flag matches every time.
-    if (log.search(settings.pattern) !== -1) {
+    // test() starts at lastIndex for a pattern with the g or y flag, so match from the start
+    // every time.
+    settings.pattern.lastIndex = 0;
+    if (settings.pattern.test(log)) {
       return settings;
     }
   }
