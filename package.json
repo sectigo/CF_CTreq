@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "node tools/build.mjs",
+    "blocked-keys": "node tools/blocked-keys.mjs",
     "test": "node --test test/cf_ctreq.test.js",
     "test:minified": "CTREQ_MINIFIED=1 node --test test/cf_ctreq.test.js",
     "test:forwarding": "node test/forwarding.mjs",

@@ -206,16 +206,25 @@ const NULL = [0x05, 0x00];
 const rootsList = (...roots) => rootHashes(roots.map((root) => Buffer.from(root, "base64")));
 const LOG_ENVIRONMENTS = /^(\s*logEnvironments: )\[[\s\S]*?\n  \],$/m;
 assert.match(SOURCE, LOG_ENVIRONMENTS, "cf_ctreq.js must set CONFIG.logEnvironments to a multi-line array");
-// A snippet with the given CONFIG.logEnvironments (as source code), in the given environment.
-const logEnvironmentsSnippet = (logEnvironments, environment = ENVIRONMENT) =>
-  loadSource(SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`).replace(LOG_ENVIRONMENTS, `$1${logEnvironments},`));
+const BLOCKED_KEY_NAMES = /^const BLOCKED_KEY_NAMES = new Uint32Array\(\[\n[\s\S]*?\n\]\)\.sort\(\);$/m;
+assert.match(SOURCE, BLOCKED_KEY_NAMES, "cf_ctreq.js must define BLOCKED_KEY_NAMES as a multi-line Uint32Array");
+// A snippet with the given CONFIG.logEnvironments (as source code), in the given environment,
+// and with the given BLOCKED_KEY_NAMES (as a list of hashes, as rootsList() makes them), if any.
+const logEnvironmentsSnippet = (logEnvironments, environment = ENVIRONMENT, blocked = undefined) => {
+  let source = SOURCE.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`).replace(LOG_ENVIRONMENTS, `$1${logEnvironments},`);
+  if (blocked !== undefined) {
+    source = source.replace(BLOCKED_KEY_NAMES, `const BLOCKED_KEY_NAMES = new Uint32Array([${blocked.match(/.{8}/g).map((h) => `0x${h}`)}]).sort();`);
+  }
+  return loadSource(source);
+};
 // A fresh snippet whose CONFIG.logEnvironments gives each of the given logs (hostnames,
 // optionally followed by a path) logEnvironment and a list of the given accepted roots (by
-// default, ISSUER, the issuer of all the other fixtures), with environment as the default.
-// These tests are never sent to a deployed log.
-const rootsSnippet = (logs = ["log.example.com"], { environment = ENVIRONMENT, logEnvironment = environment, roots = [ISSUER] } = {}) => {
+// default, ISSUER, the issuer of all the other fixtures), with environment as the default,
+// and with the subject names of the given certificates as BLOCKED_KEY_NAMES, if any. These
+// tests are never sent to a deployed log.
+const rootsSnippet = (logs = ["log.example.com"], { environment = ENVIRONMENT, logEnvironment = environment, roots = [ISSUER], blocked } = {}) => {
   const escape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-  return logEnvironmentsSnippet(`[${logs.map((log) => `[/^${escape(log)}\\//, ${JSON.stringify(logEnvironment)}, ${JSON.stringify(rootsList(...roots))}]`).join(", ")}]`, environment);
+  return logEnvironmentsSnippet(`[${logs.map((log) => `[/^${escape(log)}\\//, ${JSON.stringify(logEnvironment)}, ${JSON.stringify(rootsList(...roots))}]`).join(", ")}]`, environment, blocked && rootsList(...blocked));
 };
 
 // Cloudflare limits a Snippet's CPU time, not its elapsed time, so this returns the least
@@ -898,6 +907,32 @@ describe("Accepted roots", () => {
     }
   });
 
+  test("a chain that needs a certificate with a blocked key is rejected, wherever it needs it", async () => {
+    // R is the accepted root, and B's key is blocked.
+    const s = await rootsSnippet(undefined, { roots: [ca("R")], blocked: [ca("B")] });
+    const submit = async (chain) => {
+      const res = await s.fetch(post("/ct/v1/add-chain", { chain }));
+      return [outcome(res), outcome(res) === "forwarded" ? undefined : (await res.json()).detail];
+    };
+    const issuedBy = (issuer) => b64(makeCert({ issuer }));
+    // Issued under the blocked key's name, with B cross-signed by R.
+    assert.deepEqual(await submit([issuedBy("B"), ca("B", "R")]), ["key-blocked", "the issuer of chain[0] has a blocked key"]);
+    assert.deepEqual(await submit([issuedBy("B")]), ["root-not-accepted", undefined]);
+    // An intermediate issued under it.
+    assert.deepEqual(await submit([issuedBy("I"), ca("I", "B"), ca("B", "R")]), ["key-blocked", "the issuer of chain[1] has a blocked key"]);
+    // Not if the chain reaches the root first, so that the rest of it isn't needed.
+    assert.deepEqual(await submit([issuedBy("I"), ca("I", "R"), ca("R", "B")]), ["forwarded", undefined]);
+    // Nor if another certificate in the chain might lead to the root instead.
+    assert.deepEqual(await submit([issuedBy("I"), ca("I", "B"), ca("B", "I"), ca("I", "R")]), ["forwarded", undefined]);
+    // Nor if the blocked key's name is also an accepted root's.
+    const rootToo = await rootsSnippet(undefined, { roots: [ca("B")], blocked: [ca("B")] });
+    assert.equal(outcome(await rootToo.fetch(post("/ct/v1/add-chain", { chain: [issuedBy("B")] }))), "forwarded");
+    // Nor for logs without a list of accepted roots, for which it isn't known where the chain
+    // ends.
+    const unlisted = await logEnvironmentsSnippet("[]", ENVIRONMENT, rootsList(ca("B")));
+    assert.equal(outcome(await unlisted.fetch(post("/ct/v1/add-chain", { chain: [issuedBy("B"), ca("B", "R")] }))), "forwarded");
+  });
+
   test("tools/roots-hashes.mjs lists the same roots from a get-roots response or a PEM bundle", () => {
     const roots = [ca("A"), ca("B", "A"), ISSUER, ISSUER];
     const pem = roots.map((root) => `# A comment\n-----BEGIN CERTIFICATE-----\n${root.match(/.{1,64}/g).join("\n")}\n-----END CERTIFICATE-----\n`).join("");
@@ -1092,13 +1127,14 @@ describe("Origin environments and rejection responses", () => {
       "cert-on-add-pre-chain": post(PRE, { chain: [CERT] }),
       "issuer-mismatch": post(ADD, { chain: [CERT, otherCA] }),
       "root-not-accepted": post(ADD, { chain: [b64(makeCert({ issuer: "Unknown CA" }))] }),
+      "key-blocked": post(ADD, { chain: [b64(makeCert({ issuer: "Blocked CA" })), ca("Blocked CA", "Test CA")] }),
     };
     if (ENVIRONMENT === "sunlight") {
       const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
       cases["psc-not-supported"] = post(PRE, { chain: [PRECERT, psc, ISSUER] });
     }
     for (const [reason, req] of Object.entries(cases)) {
-      const res = await (reason === "root-not-accepted" ? await rootsSnippet() : snippet).fetch(req);
+      const res = await (reason === "root-not-accepted" ? await rootsSnippet() : reason === "key-blocked" ? await rootsSnippet(undefined, { blocked: [ca("Blocked CA")] }) : snippet).fetch(req);
       assert.notEqual(res.status, 200, reason);
       assert.equal(res.headers.get("X-CTreq-Reject"), reason);
       assert.equal(res.headers.get("Content-Type"), "application/problem+json", reason);

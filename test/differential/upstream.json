@@ -21,7 +21,8 @@
       "reviewed": "5eed85d78c103401df28e6d08dce225d984b7b52",
       "files": {
         "internal/ctlog/http.go": "8fdee358542429bd456e68fc89570221a3abe9d0",
-        "go.mod": "0318e627e019ac1ff7c696cfa5c8fd1224e136ae"
+        "go.mod": "0318e627e019ac1ff7c696cfa5c8fd1224e136ae",
+        "cmd/sunlight/sunlight.go": "6f5531985885f9c1ede9cc5ea1f70d728f6a66ee"
       }
     },
     {
@@ -37,7 +38,8 @@
         "x509/verify.go": "07118c2bf6543f9dbf16caeefb7dddfc52671cff",
         "asn1/asn1.go": "336813ac1024b2941bfb98f369ca74ec2c295542",
         "serialization.go": "2a6c21ed4cfdfab5380838967d2b5a4538efb3eb",
-        "types.go": "10092af44d3d1fd0812350201c2f1d655b31140b"
+        "types.go": "10092af44d3d1fd0812350201c2f1d655b31140b",
+        "trillian/ctfe/instance.go": "5f7cd3f5295372f912e8f5a1fb8f67c9e7623e52"
       }
     }
   ]
