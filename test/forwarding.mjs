@@ -10,11 +10,11 @@
 //
 // Usage: CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:forwarding
 import { test } from "node:test";
-import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import assert from "node:assert/strict";
 import { GOOGLE_MONITOR_LEAF, GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT } from "./google-monitor.mjs";
 import { cloudflareError, describeBody } from "./cloudflare.mjs";
-import { certificatesIn, rootsHashList } from "../tools/roots-hashes.mjs";
+import { outputs } from "../tools/build.mjs";
 
 if (!process.env.CTREQ_LOG_URL) {
   console.error("Usage: CTREQ_LOG_URL=<production log URL> npm run test:forwarding, e.g. CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com");
@@ -26,22 +26,21 @@ const endpoint = (name) => new URL(log.pathname.replace(/\/$/, "") + "/ct/v1/" +
 test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
   const roots = await fetch(endpoint("get-roots"));
   assert.equal(roots.status, 200, `get-roots: ${roots.status}`);
-  const rootsText = await roots.text();
-  assert.ok(JSON.parse(rootsText).certificates.includes(GOOGLE_MONITOR_ROOT), "this log doesn't accept Google's monitoring root (only production logs do), so it can't be used for this test");
+  assert.ok((await roots.json()).certificates.includes(GOOGLE_MONITOR_ROOT), "this log doesn't accept Google's monitoring root (only production logs do), so it can't be used for this test");
 
   const leaf = Buffer.from(GOOGLE_MONITOR_LEAF, "base64");
   leaf[leaf.length - 1] ^= 0xff;
   const body = JSON.stringify({ chain: [leaf.toString("base64"), GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT] });
 
-  // The local snippet, with its own configuration for this log and the log's roots (if it
-  // has a roots URL), must forward it.
-  const rootsList = rootsHashList(certificatesIn(rootsText));
-  const source = readFileSync(new URL("../cf_ctreq.js", import.meta.url), "utf8");
-  const local = (await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))).default;
+  // The local snippet, as built for deployment in the log's zone (or else the generic one),
+  // with its configuration and accepted roots for this log, must forward it.
+  const source = readFileSync(new URL("../src/cf_ctreq.js", import.meta.url), "utf8");
+  const zoned = outputs(source).filter(({ zone }) => zone === "" || log.hostname.endsWith(`.${zone}`)).at(-1);
+  t.diagnostic(`checked with the local ${zoned.file}`);
+  const local = (await import(`../${zoned.file}`)).default;
   const networkFetch = globalThis.fetch;
   let forwarded = false;
-  globalThis.fetch = async (req) => {
-    if (!(req instanceof Request)) return new Response(rootsList);
+  globalThis.fetch = async () => {
     forwarded = true;
     return new Response(null, { status: 200 });
   };

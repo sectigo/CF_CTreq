@@ -1,14 +1,4 @@
-// Generates the list of a log's accepted roots that a roots URL in CONFIG.logEnvironments
-// serves (see ROOTS_HEADER in cf_ctreq.js): the hashes of the roots' subject names, each
-// followed by the subject name, for people to read.
-//
-// Usage: npm run roots-hashes -- <source> > roots.txt
-// where <source> is the URL of a log's get-roots endpoint, or a file containing a get-roots
-// response ({"certificates": [...]}) or a bundle of PEM certificates.
-import { readFileSync } from "node:fs";
-import { X509Certificate } from "node:crypto";
-
-export const ROOTS_HEADER = "CF_CTreq Accepted Roots v1";
+// Hashes lists of accepted roots for the minified snippets (see ACCEPTED_ROOTS in cf_ctreq.js).
 
 // Returns the DER certificates in a get-roots response or a bundle of PEM certificates.
 export function certificatesIn(text) {
@@ -47,35 +37,8 @@ export function subjectHash(der) {
   return h >>> 0;
 }
 
-// Returns the list for the given DER certificates, sorted by hash, with any comment lines.
-export function rootsHashList(certs, comments = []) {
-  const lines = certs.map((der) => {
-    let name;
-    try {
-      name = new X509Certificate(der).subject.split("\n").join(", ");
-    } catch {
-      name = "(unreadable subject)";
-    }
-    return `${subjectHash(der).toString(16).padStart(8, "0")}  ${name}`;
-  });
-  return [ROOTS_HEADER, ...comments.map((c) => `# ${c}`), ...[...new Set(lines)].sort()].join("\n") + "\n";
-}
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const [source] = process.argv.slice(2);
-  if (!source) {
-    console.error("Usage: npm run roots-hashes -- <get-roots URL, or get-roots response or PEM bundle file> > roots.txt");
-    process.exit(2);
-  }
-  let text;
-  if (/^https?:\/\//.test(source)) {
-    const res = await fetch(source);
-    if (!res.ok) throw new Error(`${source}: HTTP ${res.status}`);
-    text = await res.text();
-  } else {
-    text = readFileSync(source, "utf8");
-  }
-  const certs = certificatesIn(text);
-  if (!certs.length) throw new Error(`${source}: no certificates found`);
-  process.stdout.write(rootsHashList(certs, [`${certs.length} roots, from ${source}`]));
+// Returns a list of accepted roots, as tools/build.mjs writes it into the minified snippets: the
+// hashes of the given DER certificates' subject names, sorted, as 8 hex digits each.
+export function rootHashes(certs) {
+  return [...new Set(certs.map((der) => subjectHash(der).toString(16).padStart(8, "0")))].sort().join("");
 }

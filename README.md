@@ -47,7 +47,7 @@ CF_CTreq stops these requests at the CDN edge instead, before they reach the ori
 
 ## How does it work?
 
-Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  As the origin's router (Go's `http.ServeMux`, in TesseraCT, Sunlight and Trillian) does, each segment of the path is percent-decoded before matching, so e.g. `/ct/v1/add%2Dchain` is also checked.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below, and the [origin environment](#origin-environment), are set in the `CONFIG` object at the top of [`cf_ctreq.js`](cf_ctreq.js).
+Requests to the `/ct/v1/add-chain` and `/ct/v1/add-pre-chain` endpoints are checked in the order of the [rejection reasons](#rejection-reasons) below, and are rejected at the first check that fails.  As the origin's router (Go's `http.ServeMux`, in TesseraCT, Sunlight and Trillian) does, each segment of the path is percent-decoded before matching, so e.g. `/ct/v1/add%2Dchain` is also checked.  All other requests (and valid submissions) are forwarded to the origin unchanged.  The limits mentioned below, and the [origin environment](#origin-environment), are set in the `CONFIG` object at the top of [`cf_ctreq.js`](src/cf_ctreq.js).
 
 The body is interpreted as the origin would interpret it, so that the snippet neither rejects a request that the origin would accept nor checks a different chain from the one the origin would use.  For example, the `Content-Type` is not checked, the `chain` key is matched regardless of the case of its letters, and line breaks in base64 are ignored.
 
@@ -62,16 +62,16 @@ The origins differ slightly in what they reject, so `CONFIG.environment` selects
 | `sunlight` | What [Sunlight](https://github.com/FiloSottile/sunlight) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 | `trillian` | What the [Trillian](https://github.com/google/certificate-transparency-go/tree/master/trillian) CT front end (CTFE) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 
-If one Snippet serves several logs that run different software, `CONFIG.logEnvironments` selects the environment for each log: it is a list of `[regular expression, environment, roots URL]` entries, and a request uses the environment of the first entry whose regular expression matches its hostname followed by its path (e.g. `tiger2027h1.ct.sectigo.com/ct/v1/add-chain`), or else `CONFIG.environment`.  So a log can be identified by its hostname or by a path prefix.  The optional roots URL serves a list of the hashes of the log's accepted roots' subject names (see [Accepted roots](#accepted-roots)), which are only checked for logs that have one, e.g.:
+If one Snippet serves several logs that run different software, `CONFIG.logEnvironments` selects the environment for each log: it is a list of `[regular expression, environment, accepted roots]` entries, and a request uses the environment of the first entry whose regular expression matches its hostname followed by its path (e.g. `tiger2027h1.ct.sectigo.com/ct/v1/add-chain`), or else `CONFIG.environment`.  So a log can be identified by its hostname or by a path prefix.  The optional accepted roots are a list from `ACCEPTED_ROOTS` (see [Accepted roots](#accepted-roots)), which are only checked for logs that have one, e.g.:
 
 ```js
 logEnvironments: [
-  [/^(tiger|elephant)\d{4}h[12]\.ct\.example\.com\//, "trillian", "https://roots.example.net/accepted-roots.txt"],
+  [/^(tiger|elephant)\d{4}h[12]\.ct\.example\.com\//, "trillian", ACCEPTED_ROOTS.example],
   [/^ct\.example\.com\/2027h1\//, "sunlight"],
 ],
 ```
 
-It lists Sectigo's [logs](https://github.com/sectigo/CTLogs) by default (TesseraCT for Monument, Statue, Billboard and Standee, and Trillian for Elephant, Tiger, Dumbo and Tigger), without roots URLs, which doesn't affect other logs.  A misspelt environment, here or in `CONFIG.environment`, or a roots URL that isn't a URL or that the log's own regular expression matches, makes the Snippet fail as soon as it is deployed.
+It lists Sectigo's [logs](https://github.com/sectigo/CTLogs) by default (TesseraCT for Monument, Statue, Billboard and Standee, and Trillian for Elephant, Tiger, Dumbo and Tigger), each with its accepted roots (the production logs that accept submissions, Monument, Statue, Elephant and Tiger, all accept the same roots), which doesn't affect other logs.  They're grouped by the Cloudflare zone that they're in (`ct.sectigo.com` or `ctlabs.sectigo.com`), in conditions on `ZONE`, so that only each zone's snippet has them, and the generic snippet has none of them (see [Deployment](#deployment)).  Entries that aren't in such a condition are in every snippet.  A misspelt environment, here or in `CONFIG.environment`, or accepted roots that are neither a list nor a placeholder URL, makes the Snippet fail as soon as it is deployed.
 
 All the origins parse the request body in the same way, but they differ as follows, so these checks depend on the environment:
 
@@ -114,7 +114,7 @@ In the `sunlight` and `common` environments, rejection responses (other than `40
 
 #### body-too-large
 
-`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read or roots are fetched, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`, though its handlers also limit every `POST` body to 512 KiB, so a larger setting has no effect), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
+`413 Content Too Large`, as the origin responds, if the `Content-Length` exceeds the limit, which is checked before the body is read, or if the body itself turns out to exceed it (e.g. when it is sent without a `Content-Length`), in which case reading stops at the limit.  The limit is the origin's default: 128 KiB for Sunlight (which can't be changed), 512 KiB for TesseraCT (`--max_cert_chain_bytes`) and 512,000 bytes for Trillian (`--max_cert_chain_size`, though its handlers also limit every `POST` body to 512 KiB, so a larger setting has no effect), and 512 KiB in the `common` environment.  If the origin is configured with a different limit, set `CONFIG.maxBodyBytes` to it.
 
 #### invalid-json
 
@@ -166,9 +166,9 @@ A `chain` of more than 10 entries (`CONFIG.maxChainLength`) is forwarded to the 
 
 `400 Bad Request` if `chain` doesn't lead to one of the log's accepted roots: no certificate in `chain` has an issuer name that is byte-identical to the subject name of an accepted root, and nor is `chain` just one certificate with such a subject name.  The origins find a chain's root by name in the same way (TesseraCT, Sunlight and Trillian all require the root's subject name to match the issuer name of the certificate that it signs), and only accept the chain if it is the submitted chain, perhaps followed by the root.  Only names are compared, so a chain may still be rejected by the origin, e.g. if a signature is invalid.  The lookup stops at the first certificate whose issuer is an accepted root, so the certificates after it aren't checked against the roots (but must still meet [`issuer-mismatch`](#issuer-mismatch)).
 
-This check is only made for logs that `CONFIG.logEnvironments` gives a roots URL: the URL, on another hostname, of a list of the hashes of the log's accepted roots' subject names (see [Accepted roots](#accepted-roots) for how to generate and configure one).  It isn't made for logs whose entry has no roots URL (or `""` or `null`), or that use `CONFIG.environment`.  The snippet can't read the log's own `get-roots` endpoint, as Cloudflare fails a request with [error 1201](https://developers.cloudflare.com/rules/snippets/errors/) ("Snippet tried to continue to origin multiple times") if a Snippet makes more than one request to the origin: forwarding the submission after fetching `get-roots` from the log's hostname would always fail.  So a roots URL that the log's own regular expression matches makes the Snippet fail as soon as it is deployed, and one on the requested hostname is ignored.
+This check is only made for logs that `CONFIG.logEnvironments` gives a list of accepted roots, which the minified snippets contain (see [Accepted roots](#accepted-roots)).  It isn't made for logs whose entry has no list (or `""` or `null`), or that use `CONFIG.environment`, nor by the readable source [`cf_ctreq.js`](src/cf_ctreq.js), whose lists are placeholders.  The snippet can't read the log's own `get-roots` endpoint instead, as Cloudflare fails a request with [error 1201](https://developers.cloudflare.com/rules/snippets/errors/) ("Snippet tried to continue to origin multiple times") if a Snippet makes more than one request to the origin.
 
-The fetch starts while the request body is read, but the snippet doesn't wait for it if every origin already rejects the chain for another reason. The hashes are kept in a sorted `Uint32Array` (4 bytes per root), which is searched by binary search (about 10 comparisons for 700 roots).  A name whose hash matches a root's, but which isn't the root's name, only makes the snippet forward the chain, for the origin to reject as it would without the snippet, so hash collisions (even contrived ones) can never cause a false rejection.  The hashes are cached for `CONFIG.rootsCacheSeconds` (60 by default), both in Cloudflare's cache (via the `fetch()` options `cacheEverything` and `cacheTtlByStatus`, so that error responses aren't cached) and in the snippet's memory (for up to 100 logs).  If the list can't be read (e.g. the response is an error, doesn't start with the expected line, has a line that doesn't start with a hash, has no hashes at all, or is larger than 256 KiB), this check is skipped, so the snippet never rejects a chain for want of it (nor rejects every chain because of an empty list); such a response is cached too, but a failed fetch isn't.
+The list holds the hashes of the roots' subject names, which are kept in a sorted `Uint32Array` (4 bytes per root) and searched by binary search (about 10 comparisons for 700 roots).  A name whose hash matches a root's, but which isn't the root's name, only makes the snippet forward the chain, for the origin to reject as it would without the snippet, so hash collisions (even contrived ones) can never cause a false rejection.
 
 ### Checks that are not done
 
@@ -185,16 +185,16 @@ The snippet's body size limit is the origin's (see [`body-too-large`](#body-too-
 
 ## Deployment
 
-Set `CONFIG.environment` in [`cf_ctreq.js`](cf_ctreq.js) to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leave it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software or their accepted roots are to be checked (see [Origin environment](#origin-environment) and [Accepted roots](#accepted-roots)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)). Then generate the deployment file:
+Set `CONFIG.environment` in [`cf_ctreq.js`](src/cf_ctreq.js) to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leave it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software or their accepted roots are to be checked (see [Origin environment](#origin-environment) and [Accepted roots](#accepted-roots)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)). Then generate the deployment files:
 
 ```
 npm ci
 npm run build
 ```
 
-This uses [Terser](https://terser.org/) to remove comments, compress code and shorten variable names, writing [`cf_ctreq.min.js`](cf_ctreq.min.js) without changing the readable source. Do not edit the generated file directly. The [minification workflow](.github/workflows/minify.yml) regenerates, tests and commits it to the same branch whenever the source or minifier configuration changes on a push (or when run manually). The workflow needs permission to push to that branch; branch protection rules must allow its bot commits.
+This runs [`tools/build.mjs`](tools/build.mjs), which fetches the lists of accepted roots (see [Accepted roots](#accepted-roots)), and uses [Terser](https://terser.org/) to remove comments, compress code and shorten variable names, without changing the readable source.  It writes, in [`dist/`](dist), a snippet for each Cloudflare zone that `CONFIG.logEnvironments` compares `ZONE` with, such as [`cf_ctreq.ct.sectigo.com.min.js`](dist/cf_ctreq.ct.sectigo.com.min.js) and [`cf_ctreq.ctlabs.sectigo.com.min.js`](dist/cf_ctreq.ctlabs.sectigo.com.min.js), in which `ZONE` is set to that zone, so that the minifier removes other zones' logs and their lists of accepted roots; and the generic [`cf_ctreq.min.js`](dist/cf_ctreq.min.js), in which `ZONE` is `""`, so that it has no zone's logs (and so none of Sectigo's).  Do not edit the generated files directly. To rebuild them after changing only the code, with the lists that they already have rather than fetching them, run `npm run build -- --offline`. The [minification workflow](.github/workflows/minify.yml) regenerates, tests and commits them to the same branch whenever the source, build tools or minifier configuration change on a push, hourly (in case the lists have changed), or when run manually. The workflow needs permission to push to that branch; branch protection rules must allow its bot commits.
 
-Create a Snippet in the Cloudflare dashboard with the contents of [`cf_ctreq.min.js`](cf_ctreq.min.js), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
+Create a Snippet in the Cloudflare dashboard with the contents of the zone's snippet (e.g. [`cf_ctreq.ct.sectigo.com.min.js`](dist/cf_ctreq.ct.sectigo.com.min.js) in the `ct.sectigo.com` zone), or else the generic [`cf_ctreq.min.js`](dist/cf_ctreq.min.js), and attach a rule that matches the log's `add-chain` and `add-pre-chain` endpoints, e.g.:
 
 ```
 ends_with(http.request.uri.path, "/ct/v1/add-chain") or ends_with(http.request.uri.path, "/ct/v1/add-pre-chain")
@@ -204,41 +204,34 @@ The snippet forwards every request that isn't for an `add-chain` or `add-pre-cha
 
 Keep **Normalize incoming URLs** turned on (under **Rules** > **Settings** > **URL Normalization**; it is on by default).  The origin also routes percent-encoded forms of these paths, such as `/ct/v1/add%2Dchain`, to the same endpoints, and [URL normalization](https://developers.cloudflare.com/rules/normalization/how-it-works/) decodes them before the rule above is evaluated.  If it were turned off, the rule wouldn't match them, so they would reach the origin without being checked.
 
-The snippet makes up to two subrequests per request: one to forward it, and, for a log with a roots URL, at most once per `CONFIG.rootsCacheSeconds` for each copy of the snippet, one to the roots URL.  That is within every plan's [subrequest limit](https://developers.cloudflare.com/rules/snippets/#availability) (2 on Pro), provided that the roots URL isn't redirected.  Only one of them may go to the origin, or else Cloudflare fails the request with error 1201, so the roots URL must be on another hostname (see [Accepted roots](#accepted-roots)); whether one on another hostname in the same Cloudflare zone counts as the origin too isn't documented, so check a new roots URL with the [resubmission](#resubmission) check before relying on it.
+The snippet makes one subrequest per request that it doesn't reject: forwarding it to the origin.
 
 ### Accepted roots
 
-To check that chains lead to one of a log's accepted roots (see [`root-not-accepted`](#root-not-accepted)), the snippet needs a list of the hashes of the roots' subject names, precalculated so that reading it takes little CPU time even for hundreds of roots.  [`tools/roots-hashes.mjs`](tools/roots-hashes.mjs) generates it from the log's `get-roots` endpoint, or from a file containing a `get-roots` response or a bundle of PEM certificates:
-
-```
-npm run roots-hashes -- https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots > tiger2027h1-accepted-roots.txt
-```
-
-The list starts with the line `CF_CTreq Accepted Roots v1`, followed by one line per root: the 32-bit [FNV-1a](https://datatracker.ietf.org/doc/html/draft-eastlake-fnv) hash of its DER-encoded subject name (including the tag and length), as 8 hex digits, then (optionally) whitespace and its subject name, for people to read; blank lines, and lines starting with `#`, are ignored.  For example:
-
-```
-CF_CTreq Accepted Roots v1
-# 232 roots, from https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots
-016305c1  OU=GlobalSign Root CA - R6, O=GlobalSign, CN=GlobalSign
-01803395  C=US, ST=Texas, L=Houston, O=SSL Corporation, CN=SSL.com EV Root Certification Authority RSA R2
-...
-```
-
-Publish the list on a web server on another hostname than the log's (preferably outside the log's Cloudflare zone: see the subrequests paragraph [above](#deployment)), and add its URL to the log's entry in `CONFIG.logEnvironments` as the third element (see [Origin environment](#origin-environment)), e.g.:
+To check that chains lead to one of a log's accepted roots (see [`root-not-accepted`](#root-not-accepted)), the snippet needs a list of the hashes of the roots' subject names, precalculated so that it takes little CPU time even for hundreds of roots.  `ACCEPTED_ROOTS` in [`cf_ctreq.js`](src/cf_ctreq.js) defines each list as a placeholder: the URL of a bundle of PEM certificates, or of a log's `get-roots` endpoint, e.g.:
 
 ```js
-[/^tiger2027h1\.ct\.example\.com\//, "trillian", "https://roots.example.net/tiger2027h1-accepted-roots.txt"],
+const ACCEPTED_ROOTS = {
+  sectigo: "https://raw.githubusercontent.com/sectigo/CTLogs/main/pem/monument-ca-roots.pem",
+  ...
+};
 ```
 
-Several logs that accept the same roots can share a roots URL, and its list is then fetched and cached once.  After deploying, check the log with the [resubmission](#resubmission) check: it fails if Cloudflare fails the snippet (e.g. with error 1201), or if the snippet rejects any of the log's own recent entries, e.g. because the list is missing one of their roots.
+`npm run build` fetches each one, and replaces it in the snippets of the zones whose logs use it with the 32-bit [FNV-1a](https://datatracker.ietf.org/doc/html/draft-eastlake-fnv) hashes of the roots' DER-encoded subject names (including the tag and length), sorted, as 8 hex digits per root (about 2 KB for 238 roots, and 7 KB for 907).  Give a list to each log that accepts those roots, as the third element of its entry in `CONFIG.logEnvironments` (see [Origin environment](#origin-environment)), e.g.:
 
-Regenerate and republish the list whenever the log's accepted roots change: if a root is missing from it, chains that lead to that root are rejected, although the log would accept them.  The snippet uses a new list within `CONFIG.rootsCacheSeconds`.
+```js
+[/^tiger2027h1\.ct\.example\.com\//, "trillian", ACCEPTED_ROOTS.sectigo],
+```
+
+Several logs that accept the same roots can share a list, which is included once.  Each list adds to the size of its zone's snippet, which is [limited](#limits) to 32 KB: the generic `cf_ctreq.min.js` is about 10 KB, `cf_ctreq.ct.sectigo.com.min.js` (250 roots) about 13 KB, and `cf_ctreq.ctlabs.sectigo.com.min.js` (1,716 roots) about 24 KB, leaving room for about 950 more roots in it.
+
+Sectigo's lists come from the [CTLogs](https://github.com/sectigo/CTLogs) repository, whose PEM bundles are authoritative: a log's `get-roots` may briefly differ from its bundle while the log is updated.  Rebuild the snippets, and redeploy the log's zone's snippet, whenever a log's accepted roots change: if a root is missing from its list, chains that lead to that root are rejected, although the log would accept them.  (The minification workflow rebuilds them hourly, and commits them if the lists have changed, but they must still be redeployed.)  After deploying, check the log with the [resubmission](#resubmission) check: it fails if the snippet rejects any of the log's own recent entries, e.g. because the list is missing one of their roots.
 
 ### Limits
 
-Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of CPU time (time spent waiting for subrequests doesn't count), 2 MB of memory and 32 KB of code. Deploy [`cf_ctreq.min.js`](cf_ctreq.min.js), which is tested against that size limit, rather than the larger readable source. Measured with Node.js on a typical machine (where CPU time is only an approximation of Cloudflare's), a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the CPU time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
+Cloudflare [limits](https://developers.cloudflare.com/rules/snippets/#limits) a Snippet to 5 ms of CPU time (time spent waiting for subrequests doesn't count), 2 MB of memory and 32 KB of code. Deploy a minified snippet (see [Deployment](#deployment)), which is tested against that size limit, rather than the larger readable source. Measured with Node.js on a typical machine (where CPU time is only an approximation of Cloudflare's), a typical request takes about 0.05 ms, and a real certificate as large as the body size limit allows (e.g. one with 20,000 DNS names in 512 KiB) takes about 2 ms.  Only crafted certificates take longer: the slowest that the 128 KiB limit allows (one with about 10,000 extensions) takes about 1 ms in the `sunlight` environment, but the slowest that the 512 KiB limit allows (about 43,000 extensions) takes about 4 ms in the `trillian` environment, 10 ms in the `tesseract` environment (which also checks for duplicate extensions), and 12 ms in the `common` environment (which parses each certificate with both X.509 parsers).  A request that exceeds the CPU time limit fails with Cloudflare [error 1203](https://developers.cloudflare.com/rules/snippets/errors/), rather than being forwarded or rejected.  No CA would issue such a certificate, so a log could only receive one from a client that was testing it; set `CONFIG.maxBodyBytes` to `131072` to keep even those within the limit, at the cost of rejecting larger chains that the origin would accept.
 
-Checking the chain against the cached accepted roots adds no measurable time.  Reading a list of roots, when it isn't cached in memory, adds about 0.1 ms or less, even for 700 roots (about 94 KB): a whole request that reads one takes about 1.5 ms in a fresh copy of the snippet (most of it the snippet's own start-up), and 0.3 ms otherwise.  Reading the roots themselves instead (about 1 MB of certificates for 700 roots) would take about 5 ms, the whole of the time limit.  Each log's cached hashes take about 4 KB of memory, including their cache entry.
+Checking the chain against the accepted roots adds no measurable time.  The lists make a zone's snippet larger, which adds about 0.5 ms to the start-up of each copy of it (for `ctlabs.sectigo.com`'s lists, about 14 KB), and each list is decoded when a copy first needs it, which takes at most about 0.2 ms (for 907 roots) and 4 bytes of memory per root.
 
 ## Monitoring rejections
 
@@ -326,13 +319,13 @@ Whichever environment is selected, one test also checks the differences between 
 
 ### Differential tests
 
-The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names, precertificate status and body size as the origins do, but (like the snippet) don't verify signatures, and nor do they check that the chain leads to an accepted root, so the snippet is given no roots URLs (and so skips [`root-not-accepted`](#root-not-accepted)).  They require Go:
+The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names, precertificate status and body size as the origins do, but (like the snippet) don't verify signatures, and nor do they check that the chain leads to an accepted root, so the snippet's requests are for a log that has no list of accepted roots (and so skip [`root-not-accepted`](#root-not-accepted)).  They require Go:
 
 ```
 npm run test:differential
 ```
 
-`CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions. Set `CTREQ_DIFF_SNIPPET=cf_ctreq.min.js` to test the generated file instead. They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request, against both the readable source and the minified code.
+`CTREQ_DIFF_COUNT` and `CTREQ_DIFF_SEED` change the corpus, and `CTREQ_DIFF_SUNLIGHT` and `CTREQ_DIFF_TRILLIAN` the `certificate-transparency-go` versions. Set `CTREQ_DIFF_SNIPPET=dist/cf_ctreq.min.js` to test the generated file instead. They also run on [GitHub Actions](.github/workflows/differential.yml) for every push and pull request, against both the readable source and the minified code.
 
 Generated requests can only explore the variants that the generator knows about, so the tests can also replay real ones: recent entries (256 per log by default) from every usable or qualified log in [Google's log list](https://www.gstatic.com/ct/log_list/v3/log_list.json), both RFC 6962 logs (`get-entries`) and static-ct-api logs (data tiles and issuers), each rebuilt as the `add-chain` or `add-pre-chain` request that could have submitted it and compared in the same way.  This needs network access:
 
@@ -356,7 +349,7 @@ Cloudflare's [Wrangler](https://developers.cloudflare.com/workers/wrangler/) can
 
 ```
 npm run build
-npx wrangler dev cf_ctreq.min.js --compatibility-date=2026-11-01 --local-upstream tiger2027h1.ct.sectigo.com --upstream-protocol https
+npx wrangler dev dist/cf_ctreq.ct.sectigo.com.min.js --compatibility-date=2026-11-01 --local-upstream tiger2027h1.ct.sectigo.com --upstream-protocol https
 ```
 
 Requests to `http://localhost:8787` then go through the snippet, which forwards those that it doesn't reject to the log, e.g.:
@@ -407,7 +400,7 @@ It sends the log one of Google's CT log monitoring certificates, with its interm
 CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:resubmit
 ```
 
-It fails if Cloudflare fails the snippet (e.g. with error 1201) for any of them, if any of them gets another server error, or if the snippet rejects any of them, as the log has already accepted them all; it also reports the log's responses.  Such failures may only affect some of the requests (e.g. only those handled by a copy of the snippet that hasn't yet cached the log's roots), so resubmitting many entries is more likely to find them than sending one.  The log already has the entries, so it returns their existing SCTs rather than adding entries, although TesseraCT's deduplication is best-effort, so a static-ct-api log might occasionally record a duplicate (which CT allows).  A static-ct-api log is read from its monitoring URL in Google's log list; for one that isn't listed, set `CTREQ_LOG_MONITORING_URL` too:
+It fails if Cloudflare fails the snippet (e.g. with error 1201) for any of them, if any of them gets another server error, or if the snippet rejects any of them, as the log has already accepted them all; it also reports the log's responses.  Such failures may only affect some of the requests (e.g. only those handled by a fresh copy of the snippet), so resubmitting many entries is more likely to find them than sending one.  The log already has the entries, so it returns their existing SCTs rather than adding entries, although TesseraCT's deduplication is best-effort, so a static-ct-api log might occasionally record a duplicate (which CT allows).  A static-ct-api log is read from its monitoring URL in Google's log list; for one that isn't listed, set `CTREQ_LOG_MONITORING_URL` too:
 
 ```
 CTREQ_LOG_URL=https://standee.sub.ctlabs.sectigo.com CTREQ_LOG_MONITORING_URL=https://standee.mon.ctlabs.sectigo.com npm run test:resubmit
