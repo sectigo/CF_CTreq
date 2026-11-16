@@ -28,4 +28,4 @@ jobs:
       - run: npm run test:differential
       - run: npm run test:differential
         env:
-          CTREQ_DIFF_SNIPPET: cf_ctreq.min.js
+          CTREQ_DIFF_SNIPPET: dist/cf_ctreq.min.js

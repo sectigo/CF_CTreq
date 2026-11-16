@@ -13,7 +13,7 @@
 //   CTREQ_DIFF_SUNLIGHT, CTREQ_DIFF_TRILLIAN
 //                      certificate-transparency-go versions to use for the Sunlight and
 //                      Trillian models (default: those in versions.json)
-//   CTREQ_DIFF_SNIPPET path of the snippet to test (default: cf_ctreq.js)
+//   CTREQ_DIFF_SNIPPET path of the snippet to test (default: src/cf_ctreq.js)
 //   CTREQ_REPLAY_ENTRIES, CTREQ_REPLAY_LOGS
 //                      with --replay, the entries per log and the logs (see replay.mjs)
 import { spawnSync } from "node:child_process";
@@ -25,7 +25,7 @@ import { generate } from "./generate.mjs";
 import { replay } from "./replay.mjs";
 
 const here = new URL(".", import.meta.url).pathname;
-const SOURCE = readFileSync(process.env.CTREQ_DIFF_SNIPPET || new URL("../../cf_ctreq.js", import.meta.url), "utf8");
+const SOURCE = readFileSync(process.env.CTREQ_DIFF_SNIPPET || new URL("../../src/cf_ctreq.js", import.meta.url), "utf8");
 const CONFIG_ENVIRONMENT = /((?:^|[{,])\s*environment:\s*)"[a-z]*"/m;
 assert.match(SOURCE, CONFIG_ENVIRONMENT, "the snippet must set CONFIG.environment to a string literal");
 const versions = JSON.parse(readFileSync(join(here, "versions.json"), "utf8"))["certificate-transparency-go"];
@@ -99,8 +99,8 @@ if (sunlightVersion === trillianVersion) {
   runModels(trillianVersion, ["trillian"], corpusFile, verdicts);
 }
 
-// The snippet's outcomes: its rejection reason, or "forwarded". Any requests for roots get
-// this too, which isn't a list of roots, so it doesn't check chains against roots (which
+// The snippet's outcomes: its rejection reason, or "forwarded". Requests are for a log that
+// CONFIG.logEnvironments doesn't give a list of accepted roots, so it doesn't check them (which
 // the models don't model).
 globalThis.fetch = async () => new Response("origin");
 const falseRejections = [];
