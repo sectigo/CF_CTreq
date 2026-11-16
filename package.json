@@ -14,6 +14,7 @@
     "test:minified": "CTREQ_MINIFIED=1 node --test test/cf_ctreq.test.js",
     "test:forwarding": "node test/forwarding.mjs",
     "test:resubmit": "node test/resubmit.mjs",
+    "roots-hashes": "node tools/roots-hashes.mjs",
     "test:differential": "node test/differential/run.mjs",
     "test:replay": "node test/differential/run.mjs --replay"
   },
