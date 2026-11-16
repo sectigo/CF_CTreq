@@ -11,6 +11,7 @@
     - [`method-not-allowed`](#method-not-allowed), [`body-too-large`](#body-too-large), [`invalid-json`](#invalid-json), [`chain-missing`](#chain-missing), [`entry-not-base64`](#entry-not-base64), [`entry-too-short`](#entry-too-short), [`entry-not-der`](#entry-not-der), [`cert-unparseable`](#cert-unparseable), [`poison-invalid`](#poison-invalid), [`precert-on-add-chain`](#precert-on-add-chain), [`cert-on-add-pre-chain`](#cert-on-add-pre-chain), [`psc-not-supported`](#psc-not-supported), [`issuer-mismatch`](#issuer-mismatch), [`root-not-accepted`](#root-not-accepted)
   - [Checks that are not done](#checks-that-are-not-done)
 - [Deployment](#deployment)
+  - [Accepted roots](#accepted-roots)
   - [Limits](#limits)
 - [Monitoring rejections](#monitoring-rejections)
   - [Cloudflare dashboard](#cloudflare-dashboard)
@@ -60,11 +61,11 @@ The origins differ slightly in what they reject, so `CONFIG.environment` selects
 | `sunlight` | What [Sunlight](https://github.com/FiloSottile/sunlight) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 | `trillian` | What the [Trillian](https://github.com/google/certificate-transparency-go/tree/master/trillian) CT front end (CTFE) would reject (it uses Go's `encoding/json`, and `certificate-transparency-go`'s `x509` package). |
 
-If one Snippet serves several logs that run different software, `CONFIG.logEnvironments` selects the environment for each log: it is a list of `[regular expression, environment, roots URL]` entries, and a request uses the environment of the first entry whose regular expression matches its hostname followed by its path (e.g. `tiger2027h1.ct.sectigo.com/ct/v1/add-chain`), or else `CONFIG.environment`.  So a log can be identified by its hostname or by a path prefix.  The optional roots URL serves a list of the hashes of the log's accepted roots' subject names (see [`root-not-accepted`](#root-not-accepted)), which are only checked for logs that have one, e.g.:
+If one Snippet serves several logs that run different software, `CONFIG.logEnvironments` selects the environment for each log: it is a list of `[regular expression, environment, roots URL]` entries, and a request uses the environment of the first entry whose regular expression matches its hostname followed by its path (e.g. `tiger2027h1.ct.sectigo.com/ct/v1/add-chain`), or else `CONFIG.environment`.  So a log can be identified by its hostname or by a path prefix.  The optional roots URL serves a list of the hashes of the log's accepted roots' subject names (see [Accepted roots](#accepted-roots)), which are only checked for logs that have one, e.g.:
 
 ```js
 logEnvironments: [
-  [/^(tiger|elephant)\d{4}h[12]\.ct\.example\.com\//, "trillian", "https://roots.example.net/rfc6962.txt"],
+  [/^(tiger|elephant)\d{4}h[12]\.ct\.example\.com\//, "trillian", "https://roots.example.net/accepted-roots.txt"],
   [/^ct\.example\.com\/2027h1\//, "sunlight"],
 ],
 ```
@@ -164,25 +165,7 @@ A `chain` of more than 10 entries (`CONFIG.maxChainLength`) is forwarded to the 
 
 `400 Bad Request` if `chain` doesn't lead to one of the log's accepted roots: no certificate in `chain` has an issuer name that is byte-identical to the subject name of an accepted root, and nor is `chain` just one certificate with such a subject name.  The origins find a chain's root by name in the same way (TesseraCT, Sunlight and Trillian all require the root's subject name to match the issuer name of the certificate that it signs), and only accept the chain if it is the submitted chain, perhaps followed by the root.  Only names are compared, so a chain may still be rejected by the origin, e.g. if a signature is invalid.  The lookup stops at the first certificate whose issuer is an accepted root, so the certificates after it aren't checked against the roots (but must still meet [`issuer-mismatch`](#issuer-mismatch)).
 
-This check is only made for logs that `CONFIG.logEnvironments` gives a roots URL (see [Origin environment](#origin-environment)), on another hostname.  It isn't made for logs whose entry has no roots URL (or `""` or `null`), or that use `CONFIG.environment`.  The snippet can't read the log's own `get-roots` endpoint, as Cloudflare fails a request with [error 1201](https://developers.cloudflare.com/rules/snippets/errors/) ("Snippet tried to continue to origin multiple times") if a Snippet makes more than one request to the origin: forwarding the submission after fetching `get-roots` from the log's hostname would always fail.  So a roots URL that the log's own regular expression matches makes the Snippet fail as soon as it is deployed, and one on the requested hostname is ignored.
-
-The roots URL serves a list of the hashes of the log's accepted roots' subject names, precalculated so that reading it takes little CPU time even for hundreds of roots, rather than the roots themselves.  [`tools/roots-hashes.mjs`](tools/roots-hashes.mjs) generates it from the log's `get-roots` endpoint, or from a file containing a `get-roots` response or a bundle of PEM certificates:
-
-```
-npm run roots-hashes -- https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots > tiger2027h1-roots.txt
-```
-
-The list starts with the line `CF_CTreq Accepted Roots v1`, followed by one line per root: the 32-bit [FNV-1a](https://datatracker.ietf.org/doc/html/draft-eastlake-fnv) hash of its DER-encoded subject name (including the tag and length), as 8 hex digits, then (optionally) whitespace and its subject name, for people to read; blank lines, and lines starting with `#`, are ignored.  For example:
-
-```
-CF_CTreq Accepted Roots v1
-# 232 roots, from https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots
-016305c1  OU=GlobalSign Root CA - R6, O=GlobalSign, CN=GlobalSign
-01803395  C=US, ST=Texas, L=Houston, O=SSL Corporation, CN=SSL.com EV Root Certification Authority RSA R2
-...
-```
-
-Whoever runs the log must regenerate the list when the log's accepted roots change: if a root is missing from it, chains that lead to that root are rejected, although the log would accept them.  Several logs that accept the same roots can share a roots URL, and its list is then fetched and cached once.
+This check is only made for logs that `CONFIG.logEnvironments` gives a roots URL: the URL, on another hostname, of a list of the hashes of the log's accepted roots' subject names (see [Accepted roots](#accepted-roots) for how to generate and configure one).  It isn't made for logs whose entry has no roots URL (or `""` or `null`), or that use `CONFIG.environment`.  The snippet can't read the log's own `get-roots` endpoint, as Cloudflare fails a request with [error 1201](https://developers.cloudflare.com/rules/snippets/errors/) ("Snippet tried to continue to origin multiple times") if a Snippet makes more than one request to the origin: forwarding the submission after fetching `get-roots` from the log's hostname would always fail.  So a roots URL that the log's own regular expression matches makes the Snippet fail as soon as it is deployed, and one on the requested hostname is ignored.
 
 The fetch starts while the request body is read, but the snippet doesn't wait for it if every origin already rejects the chain for another reason. The hashes are kept in a sorted `Uint32Array` (4 bytes per root), which is searched by binary search (about 10 comparisons for 700 roots).  A name whose hash matches a root's, but which isn't the root's name, only makes the snippet forward the chain, for the origin to reject as it would without the snippet, so hash collisions (even contrived ones) can never cause a false rejection.  The hashes are cached for `CONFIG.rootsCacheSeconds` (60 by default), both in Cloudflare's cache (via the `fetch()` options `cacheEverything` and `cacheTtlByStatus`, so that error responses aren't cached) and in the snippet's memory (for up to 100 logs).  If the list can't be read (e.g. the response is an error, doesn't start with the expected line, has a line that doesn't start with a hash, has no hashes at all, or is larger than 256 KiB), this check is skipped, so the snippet never rejects a chain for want of it (nor rejects every chain because of an empty list); such a response is cached too, but a failed fetch isn't.
 
@@ -201,7 +184,7 @@ The snippet's body size limit is the origin's (see [`body-too-large`](#body-too-
 
 ## Deployment
 
-Set `CONFIG.environment` in [`cf_ctreq.js`](cf_ctreq.js) to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leave it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software or their accepted roots are to be checked (see [Origin environment](#origin-environment) and [`root-not-accepted`](#root-not-accepted)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)). Then generate the deployment file:
+Set `CONFIG.environment` in [`cf_ctreq.js`](cf_ctreq.js) to `tesseract`, `sunlight` or `trillian` if the log runs that software (or leave it as `common`), or `CONFIG.logEnvironments` if the Snippet serves logs that run different software or their accepted roots are to be checked (see [Origin environment](#origin-environment) and [Accepted roots](#accepted-roots)), and `CONFIG.maxBodyBytes` if the origin's body size limit isn't its default (see [`body-too-large`](#body-too-large)). Then generate the deployment file:
 
 ```
 npm ci
@@ -220,7 +203,35 @@ The snippet forwards every request that isn't for an `add-chain` or `add-pre-cha
 
 Keep **Normalize incoming URLs** turned on (under **Rules** > **Settings** > **URL Normalization**; it is on by default).  The origin also routes percent-encoded forms of these paths, such as `/ct/v1/add%2Dchain`, to the same endpoints, and [URL normalization](https://developers.cloudflare.com/rules/normalization/how-it-works/) decodes them before the rule above is evaluated.  If it were turned off, the rule wouldn't match them, so they would reach the origin without being checked.
 
-The snippet makes up to two subrequests per request: one to forward it, and, for a log with a roots URL, at most once per `CONFIG.rootsCacheSeconds` for each copy of the snippet, one to the roots URL.  That is within every plan's [subrequest limit](https://developers.cloudflare.com/rules/snippets/#availability) (2 on Pro), provided that the roots URL isn't redirected.  Only one of them may go to the origin, or else Cloudflare fails the request with error 1201, so the roots URL must be on another hostname (see [`root-not-accepted`](#root-not-accepted)); whether one on another hostname in the same Cloudflare zone counts as the origin too isn't documented, so check a new roots URL with the [resubmission](#resubmission) check before relying on it.
+The snippet makes up to two subrequests per request: one to forward it, and, for a log with a roots URL, at most once per `CONFIG.rootsCacheSeconds` for each copy of the snippet, one to the roots URL.  That is within every plan's [subrequest limit](https://developers.cloudflare.com/rules/snippets/#availability) (2 on Pro), provided that the roots URL isn't redirected.  Only one of them may go to the origin, or else Cloudflare fails the request with error 1201, so the roots URL must be on another hostname (see [Accepted roots](#accepted-roots)); whether one on another hostname in the same Cloudflare zone counts as the origin too isn't documented, so check a new roots URL with the [resubmission](#resubmission) check before relying on it.
+
+### Accepted roots
+
+To check that chains lead to one of a log's accepted roots (see [`root-not-accepted`](#root-not-accepted)), the snippet needs a list of the hashes of the roots' subject names, precalculated so that reading it takes little CPU time even for hundreds of roots.  [`tools/roots-hashes.mjs`](tools/roots-hashes.mjs) generates it from the log's `get-roots` endpoint, or from a file containing a `get-roots` response or a bundle of PEM certificates:
+
+```
+npm run roots-hashes -- https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots > tiger2027h1-accepted-roots.txt
+```
+
+The list starts with the line `CF_CTreq Accepted Roots v1`, followed by one line per root: the 32-bit [FNV-1a](https://datatracker.ietf.org/doc/html/draft-eastlake-fnv) hash of its DER-encoded subject name (including the tag and length), as 8 hex digits, then (optionally) whitespace and its subject name, for people to read; blank lines, and lines starting with `#`, are ignored.  For example:
+
+```
+CF_CTreq Accepted Roots v1
+# 232 roots, from https://tiger2027h1.ct.sectigo.com/ct/v1/get-roots
+016305c1  OU=GlobalSign Root CA - R6, O=GlobalSign, CN=GlobalSign
+01803395  C=US, ST=Texas, L=Houston, O=SSL Corporation, CN=SSL.com EV Root Certification Authority RSA R2
+...
+```
+
+Publish the list on a web server on another hostname than the log's (preferably outside the log's Cloudflare zone: see the subrequests paragraph [above](#deployment)), and add its URL to the log's entry in `CONFIG.logEnvironments` as the third element (see [Origin environment](#origin-environment)), e.g.:
+
+```js
+[/^tiger2027h1\.ct\.example\.com\//, "trillian", "https://roots.example.net/tiger2027h1-accepted-roots.txt"],
+```
+
+Several logs that accept the same roots can share a roots URL, and its list is then fetched and cached once.  After deploying, check the log with the [resubmission](#resubmission) check: it fails if Cloudflare fails the snippet (e.g. with error 1201), or if the snippet rejects any of the log's own recent entries, e.g. because the list is missing one of their roots.
+
+Regenerate and republish the list whenever the log's accepted roots change: if a root is missing from it, chains that lead to that root are rejected, although the log would accept them.  The snippet uses a new list within `CONFIG.rootsCacheSeconds`.
 
 ### Limits
 
