@@ -38,6 +38,10 @@ export function outputs(source) {
   return [{ zone: "", file: "dist/cf_ctreq.min.js" }, ...[...zones].map((zone) => ({ zone, file: `dist/cf_ctreq.${zone}.min.js` }))];
 }
 
+// Returns the minified snippet ({ zone, file }) to deploy for a log's hostname: its zone's,
+// or else the generic one.
+export const outputFor = (source, hostname) => outputs(source).filter(({ zone }) => zone === "" || hostname.endsWith(`.${zone}`)).at(-1);
+
 // Returns the lists in a minified snippet, in order.
 export const embeddedRoots = (minified) => [...minified.matchAll(LIST)].map((m) => m[1]);
 

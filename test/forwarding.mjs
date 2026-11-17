@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { GOOGLE_MONITOR_LEAF, GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT } from "./google-monitor.mjs";
 import { cloudflareError, describeBody } from "./cloudflare.mjs";
-import { outputs } from "../tools/build.mjs";
+import { outputFor } from "../tools/build.mjs";
 
 if (!process.env.CTREQ_LOG_URL) {
   console.error("Usage: CTREQ_LOG_URL=<production log URL> npm run test:forwarding, e.g. CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com");
@@ -35,7 +35,7 @@ test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
   // The local snippet, as built for deployment in the log's zone (or else the generic one),
   // with its configuration and accepted roots for this log, must forward it.
   const source = readFileSync(new URL("../src/cf_ctreq.js", import.meta.url), "utf8");
-  const zoned = outputs(source).filter(({ zone }) => zone === "" || log.hostname.endsWith(`.${zone}`)).at(-1);
+  const zoned = outputFor(source, log.hostname);
   t.diagnostic(`checked with the local ${zoned.file}`);
   const local = (await import(`../${zoned.file}`)).default;
   const networkFetch = globalThis.fetch;

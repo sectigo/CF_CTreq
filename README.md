@@ -370,15 +370,16 @@ The snippet sees the log's hostname, so `CONFIG.logEnvironments` applies as it w
 
 ### Testing a deployed log
 
-Three checks send requests to a deployed snippet, and so to the log behind it.  Each needs `CTREQ_LOG_URL` set to the log's base URL (including any path prefix such as a shard name), and is only run when requested:
+Four checks send requests to a deployed snippet, and so to the log behind it.  Each needs `CTREQ_LOG_URL` set to the log's base URL (including any path prefix such as a shard name), and is only run when requested:
 
 | Check | Command | Checks that | Sends to the log | Logs |
 |---|---|---|---|---|
 | [Rejections](#rejections) | `npm test` with `CTREQ_LOG_URL` and `CTREQ_ENVIRONMENT` set | the deployed snippet rejects requests exactly as the local one does | only requests that the snippet rejects | any |
 | [Forwarding](#forwarding) | `npm run test:forwarding` | the snippet can forward a request at all | one request that the log itself rejects | production only |
+| [Root check](#root-check) | `npm run test:roots` | the deployed snippet checks the log's accepted roots | one request that the snippet rejects | those with a list of accepted roots |
 | [Resubmission](#resubmission) | `npm run test:resubmit` | the snippet forwards real submissions | up to 256 of the log's own entries, which it already has | any |
 
-Cloudflare fails a request with error 1201 ("Snippet tried to continue to origin multiple times") if a snippet makes more than one request to the origin, which only the forwarding and resubmission checks can detect.  Before enabling a new version of the snippet in front of production logs, run the resubmission check against a test log with it enabled, then the forwarding and resubmission checks against a production log as soon as it is enabled there.
+Cloudflare fails a request with error 1201 ("Snippet tried to continue to origin multiple times") if a snippet makes more than one request to the origin, which only the forwarding and resubmission checks can detect.  Before enabling a new version of the snippet in front of production logs, run the resubmission check against a test log with it enabled, then the forwarding and resubmission checks against a production log as soon as it is enabled there.  The root check confirms that a zone's current snippet is the one deployed, with its lists of accepted roots.
 
 #### Rejections
 
@@ -399,6 +400,16 @@ CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:forwarding
 ```
 
 It sends the log one of Google's CT log monitoring certificates, with its intermediate and root, but with the certificate's signature corrupted: the snippet forwards it, and the log itself rejects it, so nothing is logged.  It passes only if the log answers with its own `400 Bad Request`.  Only production logs accept Google's monitoring root, so it first checks the log's `get-roots`, and fails without sending anything if the root isn't there.
+
+#### Root check
+
+[`test/roots.mjs`](test/roots.mjs) checks that the snippet deployed in front of a log checks the log's accepted roots, i.e. that it is a current snippet for the log's zone, with the log's list of accepted roots (see [Accepted roots](#accepted-roots)):
+
+```
+CTREQ_LOG_URL=https://tiger2027h1.ct.sectigo.com npm run test:roots
+```
+
+It sends the log one certificate whose issuer isn't a root, which the local snippet for the log's zone (in `dist/`) rejects with [`root-not-accepted`](#root-not-accepted), and passes only if the deployed snippet rejects it too.  Were the deployed snippet to forward it, the log would reject it itself (its signature is invalid too), so nothing is logged.  It is skipped if the local snippet has no list of accepted roots for the log, e.g. for a `CTREQ_LOG_URL` on `localhost`, as the log's zone is found from its hostname.
 
 #### Resubmission
 
