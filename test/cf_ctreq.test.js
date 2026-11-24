@@ -2,7 +2,7 @@ import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { tlv, seq, ctOid, OID_EKU, ext, POISON_EXT, makeCert, b64, makeCA, der, CERT, PRECERT, NONCRITICAL, ISSUER } from "./der.mjs";
+import { tlv, seq, ctOid, OID_EKU, ext, POISON_EXT, makeCert, b64, makeCA, der, CERT, PRECERT, NONCRITICAL, ISSUER, ED25519, ED25519_KEY, p256Key } from "./der.mjs";
 import { certificatesIn, rootHashes } from "../tools/roots-hashes.mjs";
 import { placeholders, withRoots, embeddedRoots, outputs, minify, build } from "../tools/build.mjs";
 import { GOOGLE_MONITOR_LEAF, GOOGLE_MONITOR_INTERMEDIATE, GOOGLE_MONITOR_ROOT } from "./google-monitor.mjs";
@@ -683,6 +683,33 @@ describe("X.509 certificate parsing", () => {
     assert.equal(forwarded, null);
   });
 
+  test("Sunlight rejects key and signature algorithms other than RSA and ECDSA", async () => {
+    const sunlightOnly = (reason) => expected({ tesseract: "forwarded", sunlight: reason, trillian: "forwarded", common: "forwarded" });
+    const rsa = (n) => seq(tlv(0x06, [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, n]), Buffer.from(NULL));
+    const issuer = (options) => b64(makeCert({ subject: Buffer.from("Test CA"), ...options }));
+    const cases = [
+      ["Ed25519 key", [b64(makeCert({ publicKey: ED25519_KEY })), ISSUER], sunlightOnly("algorithm-unsupported"), "chain[0] has a public key algorithm other than RSA or ECDSA"],
+      ["Ed25519 signature on the issuer", [CERT, issuer({ algorithm: ED25519 })], sunlightOnly("algorithm-unsupported"), "chain[1] has a signature algorithm other than RSA or ECDSA"],
+      // certificate-transparency-go's x509 reads an empty OID laxly, as no algorithm.
+      ["empty key algorithm OID", [b64(makeCert({ publicKey: seq(seq(tlv(0x06, [])), tlv(0x03, [0, 1])) })), ISSUER], sunlightOnly("algorithm-unsupported"), "chain[0] has a public key algorithm other than RSA or ECDSA"],
+      ["RSA key and signature", [b64(makeCert({ publicKey: seq(rsa(1), tlv(0x03, [0, 1])), algorithm: rsa(11) })), ISSUER], "forwarded"],
+      // RSASSA-PSS is only RSA with parameters that it supports, which aren't checked.
+      ["RSASSA-PSS with unsupported parameters", [b64(makeCert({ algorithm: rsa(10) })), ISSUER], "forwarded"],
+      ["SHA-1 with RSA (ISO OID)", [b64(makeCert({ algorithm: seq(tlv(0x06, [0x2b, 0x0e, 0x03, 0x02, 0x1d])) })), ISSUER], "forwarded"],
+      // It decodes a padded OID as if it were minimally encoded.
+      ["padded id-ecPublicKey", [b64(makeCert({ publicKey: p256Key([0x2a, 0x86, 0x48, 0x80, 0xce, 0x3d, 0x02, 0x01]) })), ISSUER], "forwarded"],
+      // An algorithm that isn't clearly an OID is left to the origin.
+      ["key algorithm that isn't an OID", [b64(makeCert({ publicKey: seq(seq(Buffer.from(NULL)), tlv(0x03, [0, 1])) })), ISSUER], "forwarded"],
+    ];
+    for (const [name, chain, want, detail] of cases) {
+      const res = await snippet.fetch(post("/ct/v1/add-chain", { chain }));
+      assert.equal(outcome(res), want, name);
+      if (want === "algorithm-unsupported") {
+        assert.equal((await res.json()).detail, detail, name);
+      }
+    }
+  });
+
   test("explicitly tagged fields are parsed as the origin's X.509 parser parses them", async () => {
     // certificate-transparency-go's encoding/asn1 (Sunlight, Trillian) ignores the length
     // of the [0] and [3] wrappers, reading the element after the header instead.
@@ -1045,6 +1072,7 @@ describe("Origin environments and rejection responses", () => {
       [() => post("/ct/v1/add-chain", { chain: [v1Poisoned] }), { tesseract: "forwarded", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "forwarded" }],
       [() => post("/ct/v1/add-pre-chain", { chain: [v1Poisoned] }), { tesseract: "cert-on-add-pre-chain", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }],
       [() => post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }), { tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }],
+      [() => post("/ct/v1/add-chain", { chain: [CERT, b64(makeCert({ subject: Buffer.from("Test CA"), publicKey: ED25519_KEY }))] }), { tesseract: "forwarded", sunlight: "algorithm-unsupported", trillian: "forwarded", common: "forwarded" }],
       // Rejected the same way by all the origins.
       [() => post("/ct/v1/add-chain", { chain: [PRECERT] }), { tesseract: "precert-on-add-chain", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "precert-on-add-chain" }],
       // Rejected by all the origins, but for different reasons: common reports TesseraCT's.
@@ -1132,6 +1160,7 @@ describe("Origin environments and rejection responses", () => {
     if (ENVIRONMENT === "sunlight") {
       const psc = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4))))]));
       cases["psc-not-supported"] = post(PRE, { chain: [PRECERT, psc, ISSUER] });
+      cases["algorithm-unsupported"] = post(ADD, { chain: [b64(makeCert({ publicKey: ED25519_KEY })), ISSUER] });
     }
     for (const [reason, req] of Object.entries(cases)) {
       const res = await (reason === "root-not-accepted" ? await rootsSnippet() : reason === "key-blocked" ? await rootsSnippet(undefined, { blocked: [ca("Blocked CA")] }) : snippet).fetch(req);

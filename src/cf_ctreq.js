@@ -30,6 +30,8 @@
 //   certificates (or the subject name of the last) must have the same hash as a root's.
 // - For such a log, the chain mustn't need a certificate with one of the keys that the
 //   origins block (see BLOCKED_KEY_NAMES) to lead to an accepted root.
+// - Sunlight only: each certificate's public key and signature algorithms must be RSA or
+//   ECDSA, as the OIDs that identify them show.
 // CONFIG.environment selects whose criteria apply: "sunlight", "tesseract", or
 // "trillian" rejects what that origin would reject, and "common" only rejects what
 // all of them would reject. CONFIG.logEnvironments can select a different one (and a
@@ -128,13 +130,15 @@ const CONFIG = {
 //   certificate-transparency-go's x509 ("ctgo");
 // - allowsOptions: it answers CORS preflight (OPTIONS) requests itself;
 // - rejectsPrecertSigningCerts: it doesn't support Precertificate Signing Certificates;
+// - requiresRsaOrEcdsa: it rejects a chain with a certificate whose public key or signature
+//   algorithm isn't RSA or ECDSA (as Chrome's CT Log Policy requires from 15 December 2026);
 // - allowsAnyOrigin: its responses have "Access-Control-Allow-Origin: *";
 // - maxBodyBytes: its (default) maximum request body size: fixed in Sunlight, and set
 //   by --max_cert_chain_bytes in TesseraCT and --max_cert_chain_size in Trillian.
 const ORIGINS = {
-  sunlight: { x509: "ctgo", allowsOptions: true, rejectsPrecertSigningCerts: true, allowsAnyOrigin: true, maxBodyBytes: 128 * 1024 },
-  tesseract: { x509: "go", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false, maxBodyBytes: 512 * 1024 },
-  trillian: { x509: "ctgo", allowsOptions: false, rejectsPrecertSigningCerts: false, allowsAnyOrigin: false, maxBodyBytes: 512000 },
+  sunlight: { x509: "ctgo", allowsOptions: true, rejectsPrecertSigningCerts: true, requiresRsaOrEcdsa: true, allowsAnyOrigin: true, maxBodyBytes: 128 * 1024 },
+  tesseract: { x509: "go", allowsOptions: false, rejectsPrecertSigningCerts: false, requiresRsaOrEcdsa: false, allowsAnyOrigin: false, maxBodyBytes: 512 * 1024 },
+  trillian: { x509: "ctgo", allowsOptions: false, rejectsPrecertSigningCerts: false, requiresRsaOrEcdsa: false, allowsAnyOrigin: false, maxBodyBytes: 512000 },
 };
 // The origins that must all reject a request for it to be rejected, for each
 // environment.
@@ -215,6 +219,27 @@ const OID_CT_POISON = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x03"; // 1.3.6.1.4.1
 const OID_CT_PRECERT_SIGNING = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x04"; // 1.3.6.1.4.1.11129.2.4.4
 const OID_EXT_KEY_USAGE = "\x55\x1d\x25"; // 2.5.29.37
 const NULL_VALUE = "\x05\x00";
+// The public key and signature algorithms that certificate-transparency-go's x509 (and so
+// Sunlight) identifies as RSA or ECDSA. It only identifies RSASSA-PSS as RSA if it supports
+// the parameters, which the snippet doesn't check, so it never rejects that.
+const RSA_OR_ECDSA_KEYS = new Set([
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01", // 1.2.840.113549.1.1.1 rsaEncryption
+  "\x2a\x86\x48\xce\x3d\x02\x01", // 1.2.840.10045.2.1 id-ecPublicKey
+]);
+const RSA_OR_ECDSA_SIGNATURES = new Set([
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x02", // 1.2.840.113549.1.1.2 md2WithRSAEncryption
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x04", // 1.2.840.113549.1.1.4 md5WithRSAEncryption
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x05", // 1.2.840.113549.1.1.5 sha1WithRSAEncryption
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0a", // 1.2.840.113549.1.1.10 RSASSA-PSS
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0b", // 1.2.840.113549.1.1.11 sha256WithRSAEncryption
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0c", // 1.2.840.113549.1.1.12 sha384WithRSAEncryption
+  "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0d", // 1.2.840.113549.1.1.13 sha512WithRSAEncryption
+  "\x2b\x0e\x03\x02\x1d", // 1.3.14.3.2.29 sha1WithRSASignature
+  "\x2a\x86\x48\xce\x3d\x04\x01", // 1.2.840.10045.4.1 ecdsa-with-SHA1
+  "\x2a\x86\x48\xce\x3d\x04\x03\x02", // 1.2.840.10045.4.3.2 ecdsa-with-SHA256
+  "\x2a\x86\x48\xce\x3d\x04\x03\x03", // 1.2.840.10045.4.3.3 ecdsa-with-SHA384
+  "\x2a\x86\x48\xce\x3d\x04\x03\x04", // 1.2.840.10045.4.3.4 ecdsa-with-SHA512
+]);
 
 // Standard, padded base64 (RFC 4648 section 4); atob() alone is more lenient. Go's
 // decoder also skips CR and LF anywhere, so those are removed before testing this.
@@ -471,11 +496,13 @@ function certExtensions(cert, list, origin) {
   return extensions;
 }
 
-// Parses a certificate into { der, issuer, subject, extensions } (the names being DER
-// encodings including headers), or returns null if the origin's X.509 parser would
-// reject it. The TBSCertificate is read field by field, as far as the extensions, as
-// the origin's parser reads it: the optional unique IDs and extensions are only found
-// directly after the public key, and anything after them is ignored.
+// Parses a certificate into { der, issuer, subject, extensions, signature, publicKey } (the
+// names being DER encodings including headers, and signature and publicKey the DER
+// locations of the signature AlgorithmIdentifier and the SubjectPublicKeyInfo), or returns
+// null if the origin's X.509 parser would reject it. The TBSCertificate is read field by
+// field, as far as the extensions, as the origin's parser reads it: the optional unique
+// IDs and extensions are only found directly after the public key, and anything after
+// them is ignored.
 // - Go's crypto/x509 (TesseraCT) only accepts v1, v2 and v3, and only reads the unique
 //   IDs from v2 and v3 certificates and the extensions from v3 certificates.
 // - certificate-transparency-go's x509 (Sunlight, Trillian) accepts any version and
@@ -532,7 +559,7 @@ function parseCert(der, origin) {
   if (fields.includes(null)) {
     return null;
   }
-  const [, signature, issuer, , subject] = fields;
+  const [, signature, issuer, , subject, publicKey] = fields;
   // Both X.509 parsers require the signature algorithm after the TBSCertificate to be
   // byte-identical to the one inside it.
   const outerSignature = derDecode(der, tbs.end, root.end);
@@ -593,6 +620,8 @@ function parseCert(der, origin) {
     issuer: der.slice(issuer.start, issuer.end),
     subject: der.slice(subject.start, subject.end),
     extensions,
+    signature,
+    publicKey,
   };
 }
 
@@ -697,6 +726,35 @@ function rootRejection(certs, roots) {
 }
 
 const keyRejection = (blockedAt) => (blockedAt < 0 ? null : rejection("key-blocked", "chain needs a certificate with a blocked key", 400, {}, `the issuer of chain[${blockedAt}] has a blocked key`));
+
+// Sunlight rejects a chain with a certificate whose public key or signature algorithm (as
+// certificate-transparency-go's x509 identifies it by its OID) isn't RSA or ECDSA. Each
+// certificate in the chain is checked, as the origin only accepts the submitted chain
+// (perhaps followed by a root). An algorithm whose OID can't be read cleanly is not
+// rejected, as the origin's parser might read it differently.
+function algorithmRejection(origin, certs) {
+  if (!origin.requiresRsaOrEcdsa) {
+    return null;
+  }
+  for (const [index, { der, signature, publicKey }] of certs.entries()) {
+    const key = algorithmOid(der, derDecode(der, publicKey.offset, publicKey.end), origin);
+    if (key !== null && !RSA_OR_ECDSA_KEYS.has(key)) {
+      return entryRejection("algorithm-unsupported", "chain entry's key or signature algorithm is not RSA or ECDSA", index, "has a public key algorithm other than RSA or ECDSA");
+    }
+    const algorithm = algorithmOid(der, signature, origin);
+    if (algorithm !== null && !RSA_OR_ECDSA_SIGNATURES.has(algorithm)) {
+      return entryRejection("algorithm-unsupported", "chain entry's key or signature algorithm is not RSA or ECDSA", index, "has a signature algorithm other than RSA or ECDSA");
+    }
+  }
+  return null;
+}
+
+// Returns the key (see oidKey()) of the OID in an AlgorithmIdentifier, or null if it can't
+// be read cleanly.
+function algorithmOid(der, identifier, origin) {
+  const oid = identifier?.tag === 0x30 ? derDecode(der, identifier.offset, identifier.end) : null;
+  return oid?.tag === 0x06 ? oidKey(der, oid.offset, oid.end, origin) : null;
+}
 
 // Returns the 32-bit FNV-1a hash of [start, end) of a binary string.
 function nameHash(s, start = 0, end = s.length) {
@@ -890,7 +948,8 @@ export default {
       if (rejections.some((r) => r === null)) {
         for (const [i, origin] of origins.entries()) {
           if (rejections[i] === null) {
-            rejections[i] = rootRejection(parsed.get(origin.x509), roots);
+            const certs = parsed.get(origin.x509);
+            rejections[i] = rootRejection(certs, roots) ?? algorithmRejection(origin, certs);
           }
         }
       }
