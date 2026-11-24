@@ -3,7 +3,7 @@
     {
       "repository": "transparency-dev/tesseract",
       "branch": "main",
-      "reviewed": "36e50a160bd58b2c6415658fffb900988fc15509",
+      "reviewed": "b7efb9e0f6e721faa6f0b2419d1b1e1f8e38e152",
       "files": {
         "internal/ct/handlers.go": "d71c082bf34f694e2ff69aa58a95e125f3984782",
         "internal/ct/chain_validation.go": "f8ba27c6256bb0d45024bb2b43594b8c06413517",
@@ -12,17 +12,17 @@
         "internal/lax509/cert_pool.go": "304e50ab334353dd7b475c611d19fc1c00aeac7b",
         "internal/types/rfc6962/rfc6962.go": "dfa58f701d578bf8587b2cfd1d8e316a1794e986",
         "ctlog.go": "9c0e2d4fbc51d23cae779cfc1d648d386aa1105d",
-        "go.mod": "cf385723cb7e598976a38b3eda053d8bab8cd6f1"
+        "go.mod": "ec8c1e303fbadbb6ce6d1a767b98b6f191104745"
       }
     },
     {
       "repository": "FiloSottile/sunlight",
       "branch": "main",
-      "reviewed": "5eed85d78c103401df28e6d08dce225d984b7b52",
+      "reviewed": "093042ef24ef95ca66af2daca922d2285027f290",
       "files": {
-        "internal/ctlog/http.go": "8fdee358542429bd456e68fc89570221a3abe9d0",
+        "internal/ctlog/http.go": "43bcb7e61a23fd654ae546886ed3e5bff89aaec6",
         "go.mod": "0318e627e019ac1ff7c696cfa5c8fd1224e136ae",
-        "cmd/sunlight/sunlight.go": "6f5531985885f9c1ede9cc5ea1f70d728f6a66ee"
+        "cmd/sunlight/sunlight.go": "8ddaeebe8a7d50eb84d3936052db4f0d2e60524f"
       }
     },
     {

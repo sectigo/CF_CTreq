@@ -2,9 +2,13 @@
 // tests: random chains of certificates with structural variants (versions, padded
 // and empty OIDs, poison and critical flag variants, Precertificate Signing
 // Certificates, malformed and misplaced extensions, mismatched signature algorithms,
-// matching and mismatching names, bit flips), wrapped in JSON with chain key, escape,
-// whitespace and BOM variants, and base64 variants.
-import { tlv, seq, ctOid, OID_EKU, ext, makeCert, b64, ISSUER } from "../der.mjs";
+// Ed25519 keys and signatures, matching and mismatching names, bit flips), wrapped in
+// JSON with chain key, escape, whitespace and BOM variants, and base64 variants.
+import { tlv, seq, ctOid, OID_EKU, ext, makeCert as makeAnyCert, b64, ED25519, ED25519_KEY, P256_KEY } from "../der.mjs";
+
+// Certificates have a valid P-256 key unless the options give another.
+const makeCert = (options) => makeAnyCert({ publicKey: P256_KEY, ...options });
+const ISSUER = b64(makeCert({ subject: Buffer.from("Test CA") }));
 
 const NULL = [0x05, 0x00];
 const SERVER_AUTH = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
@@ -59,6 +63,10 @@ export function generate({ seed = 1, count = 5000 } = {}) {
     if (rnd(6) === 0) options.afterExtensions = pick([NULL, [0x04, 0x85], [0xff, 0xff, 0xff], [0xbf, 0x1f, 0x00]]);
     if (rnd(6) === 0) options.beforeExtensions = pick([NULL, [...tlv(0x81, [0, 1])], [...tlv(0x81, [0, 1]), ...tlv(0x82, [0, 2])], [0x81, 0x7f]]);
     if (rnd(12) === 0) options.outerAlgorithm = pick([seq(tlv(0x06, [...ECDSA_SHA256.slice(0, -1), 0x03])), seq(tlv(0x06, ECDSA_SHA256), Buffer.from(NULL)), Buffer.from(NULL)]);
+    // Sunlight rejects certificates without an RSA or ECDSA key and signature.
+    const ed25519 = rnd(12);
+    if (ed25519 === 0 || ed25519 === 2) options.publicKey = ED25519_KEY;
+    if (ed25519 === 1 || ed25519 === 2) options.algorithm = ED25519;
     let cert = makeCert(options);
     // makeCert's issuer is "Test CA": replace it with another 7-character name.
     if (issuer !== "Test CA") cert = Buffer.from(cert.toString("latin1").replace("Test CA", issuer), "latin1");
