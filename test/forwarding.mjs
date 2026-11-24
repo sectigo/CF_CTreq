@@ -24,7 +24,7 @@ const log = new URL(process.env.CTREQ_LOG_URL);
 const endpoint = (name) => new URL(log.pathname.replace(/\/$/, "") + "/ct/v1/" + name, log);
 
 test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
-  const roots = await fetch(endpoint("get-roots"));
+  const roots = await fetch(endpoint("get-roots"), { signal: AbortSignal.timeout(60000) });
   assert.equal(roots.status, 200, `get-roots: ${roots.status}`);
   assert.ok((await roots.json()).certificates.includes(GOOGLE_MONITOR_ROOT), "this log doesn't accept Google's monitoring root (only production logs do), so it can't be used for this test");
 
@@ -51,7 +51,7 @@ test(`a request that the snippet forwards reaches ${log.href}`, async (t) => {
     globalThis.fetch = networkFetch;
   }
 
-  const res = await fetch(endpoint("add-chain"), { method: "POST", headers: { "Content-Type": "application/json" }, body, redirect: "manual" });
+  const res = await fetch(endpoint("add-chain"), { method: "POST", headers: { "Content-Type": "application/json" }, body, redirect: "manual", signal: AbortSignal.timeout(60000) });
   const text = (await res.text()).trim();
   t.diagnostic(`sent to the log: POST ${endpoint("add-chain")} => ${res.status} ${describeBody(text)}`);
   assert.equal(cloudflareError(text), null, `Cloudflare failed the snippet: ${res.status} error ${cloudflareError(text)}`);
