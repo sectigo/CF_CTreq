@@ -67,11 +67,14 @@ func tesseract(chain [][]byte, preChain bool) bool {
 	return isPrecert == preChain
 }
 
-// ctgo models Sunlight (rejectPreIssuers) and Trillian: ctfe.ValidateChain()'s limit on
-// the chain's length (if any), certificate-transparency-go's x509 package and
-// ctfe.IsPrecertificate(), with issuer names matching the next certificate's subject
-// byte for byte (as its chain verification requires).
-func ctgo(chain [][]byte, preChain, rejectPreIssuers bool) bool {
+// ctgo models Sunlight and Trillian: ctfe.ValidateChain()'s limit on the chain's length
+// (if any), certificate-transparency-go's x509 package and ctfe.IsPrecertificate(), with
+// issuer names matching the next certificate's subject byte for byte (as its chain
+// verification requires). For Sunlight, it also rejects a precertificate issued by a
+// Precertificate Signing Certificate, and any certificate without an RSA or ECDSA key
+// and signature (as ValidateChain() returns all the submitted certificates, plus maybe
+// a root, which the models don't check).
+func ctgo(chain [][]byte, preChain, sunlight bool) bool {
 	if chainTooLong(len(chain)) {
 		return false
 	}
@@ -92,10 +95,35 @@ func ctgo(chain [][]byte, preChain, rejectPreIssuers bool) bool {
 	if err != nil {
 		return false
 	}
-	if rejectPreIssuers && isPrecert && len(certs) > 1 && ct.IsPreIssuer(certs[1]) {
+	if sunlight && isPrecert && len(certs) > 1 && ct.IsPreIssuer(certs[1]) {
+		return false
+	}
+	if sunlight && !rsaOrECDSA(certs) {
 		return false
 	}
 	return isPrecert == preChain
+}
+
+// rsaOrECDSA reports whether every certificate has an RSA or ECDSA public key and is
+// signed with RSA or ECDSA, as Sunlight's rsaOrECDSA() requires of each one (since
+// 093042ef, internal/ctlog/http.go).
+func rsaOrECDSA(certs []*x509.Certificate) bool {
+	for _, c := range certs {
+		switch c.PublicKeyAlgorithm {
+		case x509.RSA, x509.ECDSA:
+		default:
+			return false
+		}
+		switch c.SignatureAlgorithm {
+		case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA,
+			x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA,
+			x509.SHA256WithRSAPSS, x509.SHA384WithRSAPSS, x509.SHA512WithRSAPSS,
+			x509.ECDSAWithSHA1, x509.ECDSAWithSHA256, x509.ECDSAWithSHA384, x509.ECDSAWithSHA512:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // chainTooLong returns whether ctfe.ValidateChain() rejects a chain of n certificates for
