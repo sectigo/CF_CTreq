@@ -8,7 +8,7 @@
   - [Origin environment](#origin-environment)
   - [Rejection responses](#rejection-responses)
   - [Rejection reasons](#rejection-reasons)
-    - [`method-not-allowed`](#method-not-allowed), [`body-too-large`](#body-too-large), [`invalid-json`](#invalid-json), [`chain-missing`](#chain-missing), [`entry-not-base64`](#entry-not-base64), [`entry-too-short`](#entry-too-short), [`entry-not-der`](#entry-not-der), [`cert-unparseable`](#cert-unparseable), [`poison-invalid`](#poison-invalid), [`precert-on-add-chain`](#precert-on-add-chain), [`cert-on-add-pre-chain`](#cert-on-add-pre-chain), [`psc-not-supported`](#psc-not-supported), [`issuer-mismatch`](#issuer-mismatch), [`root-not-accepted`](#root-not-accepted), [`key-blocked`](#key-blocked)
+    - [`method-not-allowed`](#method-not-allowed), [`body-too-large`](#body-too-large), [`invalid-json`](#invalid-json), [`chain-missing`](#chain-missing), [`entry-not-base64`](#entry-not-base64), [`entry-too-short`](#entry-too-short), [`entry-not-der`](#entry-not-der), [`cert-unparseable`](#cert-unparseable), [`poison-invalid`](#poison-invalid), [`precert-on-add-chain`](#precert-on-add-chain), [`cert-on-add-pre-chain`](#cert-on-add-pre-chain), [`psc-not-supported`](#psc-not-supported), [`issuer-mismatch`](#issuer-mismatch), [`root-not-accepted`](#root-not-accepted), [`key-blocked`](#key-blocked), [`algorithm-unsupported`](#algorithm-unsupported)
   - [Checks that are not done](#checks-that-are-not-done)
 - [Deployment](#deployment)
   - [Accepted roots](#accepted-roots)
@@ -87,6 +87,7 @@ All the origins parse the request body in the same way, but they differ as follo
 | Malformed header, or an empty element at the end of the TBSCertificate, after the public key | ignored | `cert-unparseable` | `cert-unparseable` | forwarded |
 | Extensions in a v1 or v2 certificate | ignored | read, as in a v3 certificate | read, as in a v3 certificate | forwarded, unless all would reject the request regardless |
 | Precertificate issued by a Precertificate Signing Certificate | accepted | `psc-not-supported` | accepted | forwarded |
+| Certificate whose public key or signature algorithm isn't RSA or ECDSA (e.g. Ed25519 or ML-DSA) | accepted | `algorithm-unsupported` | accepted | forwarded |
 
 In the `common` environment, the snippet checks the request against each origin's criteria, and only rejects it if all of them would, with the TesseraCT reason.
 
@@ -98,7 +99,7 @@ Every rejection response has an `X-CTreq-Reject` header containing a short reaso
 {"type":"https://github.com/sectigo/CF_CTreq#poison-invalid","title":"CT poison extension must be critical and contain NULL","status":400}
 ```
 
-When a particular chain entry is at fault (for `entry-not-base64`, `entry-too-short`, `entry-not-der`, `cert-unparseable` and `issuer-mismatch`), the object also has a `detail` that identifies it by its index in `chain`, e.g.:
+When a particular chain entry is at fault (for `entry-not-base64`, `entry-too-short`, `entry-not-der`, `cert-unparseable`, `issuer-mismatch` and `algorithm-unsupported`), the object also has a `detail` that identifies it by its index in `chain`, e.g.:
 
 ```json
 {"type":"https://github.com/sectigo/CF_CTreq#cert-unparseable","title":"chain entry cannot be parsed as an X.509 certificate","status":400,"detail":"chain[1] cannot be parsed as an X.509 certificate"}
@@ -178,6 +179,12 @@ The snippet checks names rather than keys, for performance: it already hashes ea
 
 `npm run blocked-keys` ([`tools/blocked-keys.mjs`](tools/blocked-keys.mjs)) regenerates `BLOCKED_KEY_NAMES` in [`cf_ctreq.js`](src/cf_ctreq.js) from the upstream projects' default lists of blocked keys, which must all be the same.  It finds every certificate with each key in [crt.sh](https://crt.sh/) (or the instance that `CRTSH_URL` gives), and fails if a certificate with one of their names doesn't have a blocked key.  The [origin drift](#differential-tests) workflow watches the files that define those lists.
 
+#### algorithm-unsupported
+
+`400 Bad Request`, in the `sunlight` environment only, if a certificate in `chain` has a public key algorithm other than RSA (`rsaEncryption`) or ECDSA (`id-ecPublicKey`), or a signature algorithm other than RSA (PKCS #1 v1.5 with MD2, MD5, SHA-1, SHA-256, SHA-384 or SHA-512, or RSASSA-PSS) or ECDSA (with SHA-1, SHA-256, SHA-384 or SHA-512).  Sunlight rejects such a chain (since [093042ef](https://github.com/FiloSottile/sunlight/commit/093042ef24ef95ca66af2daca922d2285027f290), after v0.10.3), as Chrome's [CT Log Policy](https://groups.google.com/a/chromium.org/g/ct-policy/c/mfIHqsrqgV8/m/vXRdQ42xAwAJ) requires of logs from 15 December 2026.  Every certificate in `chain` is checked, as the origins only accept the submitted chain (perhaps followed by a root).
+
+The algorithms are identified by their OIDs, decoded as `certificate-transparency-go`'s `x509` package decodes them (so e.g. a non-minimally encoded OID counts as the same OID).  An RSASSA-PSS signature algorithm is never rejected, though Sunlight only accepts the parameters that it supports, and nor is an algorithm whose OID can't be read cleanly, which is left to the origin.
+
 ### Checks that are not done
 
 As far as possible, the snippet aims to only reject requests that the origin would also reject, so that it never stops a submission from being logged.  Further checks may be added in the future, but the following checks are deliberately not done:
@@ -187,7 +194,7 @@ As far as possible, the snippet aims to only reject requests that the origin wou
 - **The log's acceptance policy**: TesseraCT can be configured to reject certificates by expiry date (`not_after_start`, `not_after_limit`, `reject_expired`, `reject_unexpired`), extended key usage, extension, intermediate, or SHA-1 signature; Trillian similarly by expiry date, extended key usage, extension, intermediate, or (to accept only CA certificates) the CA flag; and Sunlight by expiry date, or by blocked public key, and it requires the first certificate to have the `serverAuth` extended key usage (or, for a log of mark certificates, the Verified Mark Certificate one).  Repeating these checks would duplicate each log's configuration in the snippet, where it could drift out of sync.
 - **Precertificate Signing Certificate as the issuer on `add-chain`**: RFC 6962 says that a Precertificate Signing Certificate (extended key usage `1.3.6.1.4.1.11129.2.4.4`) can only sign precertificates, so a certificate that one has issued is misissued.  But none of the origins checks extended key usage along the chain (TesseraCT's [`lax509`](https://github.com/transparency-dev/tesseract/blob/main/internal/lax509/README.md) deliberately skips it, so that misissued certificates can be logged and thereby discovered).  On `add-pre-chain`, only Sunlight rejects one ([`psc-not-supported`](#psc-not-supported)).
 - **Embedded SCT list in a precertificate**: a precertificate with an embedded SCT list (OID `1.3.6.1.4.1.11129.2.4.2`) makes little sense, but none of the origins rejects one.
-- **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm (beyond matching the one after the TBSCertificate), validity, public key and signature are not checked, and nor is anything after the extensions or after an extension's value (which all the origins also ignore).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
+- **Certificate fields other than the names and extensions**: the contents of the serial number, signature algorithm (beyond matching the one after the TBSCertificate, and, in the `sunlight` environment, its OID), validity, public key (beyond, in the `sunlight` environment, its algorithm's OID) and signature are not checked, and nor is anything after the extensions or after an extension's value (which all the origins also ignore).  Checking them would add code for little benefit, because the origin rejects a certificate that it can't parse.
 
 The snippet's body size limit is the origin's (see [`body-too-large`](#body-too-large)).  None of the origins has a minimum certificate size, but the snippet's 128-byte minimum (`entry-too-short`) can't reject a chain that the origin would accept: every certificate in such a chain either has a valid signature from the next certificate in a path to a trusted root, or is byte-identical to one of the log's roots, so its names, public key and signature alone make it much larger than that.
 
@@ -327,7 +334,7 @@ Whichever environment is selected, one test also checks the differences between 
 
 ### Differential tests
 
-The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names, precertificate status and body size as the origins do, but (like the snippet) don't verify signatures, and nor do they check that the chain leads to an accepted root, so the snippet's requests are for a log that has no list of accepted roots (and so skip [`root-not-accepted`](#root-not-accepted)).  They require Go:
+The differential tests check that, in each environment, the snippet never rejects a request that one of that environment's origins would accept.  They generate a corpus of request bodies (10,000 by default) with many structural variants of certificates and chains, JSON and base64, and compare the snippet's response to each, on both endpoints, with the verdicts of [models of the origins](test/differential/origins/main.go) that use the origins' own parsers: Go's `encoding/json`, and Go's `crypto/x509` (TesseraCT) or `certificate-transparency-go`'s `x509` package (Sunlight and Trillian, at the versions in [`versions.json`](test/differential/versions.json)).  The models check names, precertificate status, body size and (for Sunlight) key and signature algorithms as the origins do, but (like the snippet) don't verify signatures, and nor do they check that the chain leads to an accepted root, so the snippet's requests are for a log that has no list of accepted roots (and so skip [`root-not-accepted`](#root-not-accepted)).  They require Go:
 
 ```
 npm run test:differential
