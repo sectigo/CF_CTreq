@@ -41,7 +41,7 @@ test(`a chain that leads to no accepted root is rejected by the snippet in front
     return;
   }
 
-  const res = await fetch(addChain, { method: "POST", headers: { "Content-Type": "application/json" }, body, redirect: "manual" });
+  const res = await fetch(addChain, { method: "POST", headers: { "Content-Type": "application/json" }, body, redirect: "manual", signal: AbortSignal.timeout(60000) });
   const text = (await res.text()).trim();
   t.diagnostic(`sent to the log: POST ${addChain} => ${res.status} ${res.headers.get("X-CTreq-Reject") ?? describeBody(text)}`);
   assert.equal(cloudflareError(text), null, `Cloudflare failed the snippet: ${res.status} error ${cloudflareError(text)}`);
