@@ -25,6 +25,8 @@
 //   Certificate.
 // - Each certificate's issuer name must be byte-identical to the subject name of
 //   the next certificate in the chain. Signatures are not verified.
+// - The chain must not repeat a path identity in a way that the origin's path builder
+//   cannot follow.
 // - The chain must lead to one of the log's accepted roots, if CONFIG.logEnvironments
 //   gives the log a list of them (see ACCEPTED_ROOTS): the issuer name of one of its
 //   certificates (or the subject name of the last) must have the same hash as a root's.
@@ -218,6 +220,7 @@ function logSettings(url) {
 const OID_CT_POISON = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x03"; // 1.3.6.1.4.1.11129.2.4.3
 const OID_CT_PRECERT_SIGNING = "\x2b\x06\x01\x04\x01\xd6\x79\x02\x04\x04"; // 1.3.6.1.4.1.11129.2.4.4
 const OID_EXT_KEY_USAGE = "\x55\x1d\x25"; // 2.5.29.37
+const OID_SUBJECT_ALT_NAME = "\x55\x1d\x11"; // 2.5.29.17
 const NULL_VALUE = "\x05\x00";
 // The public key and signature algorithms that certificate-transparency-go's x509 (and so
 // Sunlight) identifies as RSA or ECDSA. It only identifies RSASSA-PSS as RSA if it supports
@@ -452,10 +455,9 @@ function oidKey(der, start, end, origin) {
 
 // Parses the SEQUENCE of extensions inside a certificate's [3] wrapper, returning
 // { oid, critical, value } entries (oid is a key from oidKey(); value is the DER location
-// of the extnValue contents) for the extensions that this snippet checks (CT poison and
-// extended key usage), in their order in the certificate, or null if any extension is
-// malformed, as the origin's X.509 parser would. Only Go's crypto/x509 rejects two
-// extensions of the same type.
+// of the extnValue contents) for the extensions that this snippet checks, in their order
+// in the certificate, or null if any extension is malformed, as the origin's X.509 parser
+// would. Only Go's crypto/x509 rejects two extensions of the same type.
 function certExtensions(cert, list, origin) {
   const extensions = [];
   const seen = origin.x509 === "go" ? new Set() : null;
@@ -489,7 +491,7 @@ function certExtensions(cert, list, origin) {
       return null;
     }
     seen?.add(id);
-    if (id === OID_CT_POISON || id === OID_EXT_KEY_USAGE) {
+    if (id === OID_CT_POISON || id === OID_EXT_KEY_USAGE || (origin.x509 === "go" && id === OID_SUBJECT_ALT_NAME)) {
       extensions.push({ oid: id, critical, value });
     }
   }
@@ -691,6 +693,44 @@ function chainRejection(origin, certs, isPreChainAPI) {
   for (let i = 0; i < certs.length; i++) {
     if (i + 1 < certs.length && certs[i].issuer !== certs[i + 1].subject) {
       return rejection("issuer-mismatch", "issuer of a certificate does not match the subject of the next certificate in the chain", 400, {}, `the issuer of chain[${i}] does not match the subject of chain[${i + 1}]`);
+    }
+  }
+  const repeated = repeatedCertificate(origin, certs);
+  if (repeated !== null) {
+    return entryRejection("chain-repeated", "chain contains a repeated path identity", repeated[1], `has the same path identity as chain[${repeated[0]}]`);
+  }
+  return null;
+}
+
+// CT-Go avoids a certificate already in the path. TesseraCT instead compares subjects,
+// public keys and SAN extension values. Identical SPKIs guarantee equal parsed public keys,
+// but different encodings might also represent the same key. If an earlier certificate
+// could trigger TesseraCT's SAN-presence early return, leave the chain to the origin.
+function repeatedCertificate(origin, certs) {
+  for (let i = 1; i < certs.length; i++) {
+    const candidate = certs[i];
+    if (origin.x509 === "ctgo") {
+      const previous = certs.findIndex((cert, j) => j < i && cert.der === candidate.der);
+      if (previous >= 0) {
+        return [previous, i];
+      }
+      continue;
+    }
+    const candidateSan = candidate.extensions.find((e) => e.oid === OID_SUBJECT_ALT_NAME);
+    const candidateKey = candidate.der.slice(candidate.publicKey.start, candidate.publicKey.end);
+    for (let j = 0; j < i; j++) {
+      const previous = certs[j];
+      if (previous.subject !== candidate.subject) {
+        continue;
+      }
+      const previousSan = previous.extensions.find((e) => e.oid === OID_SUBJECT_ALT_NAME);
+      if ((candidateSan === undefined) !== (previousSan === undefined)) {
+        break;
+      }
+      if (candidateKey === previous.der.slice(previous.publicKey.start, previous.publicKey.end) &&
+          (candidateSan === undefined || candidate.der.slice(candidateSan.value.offset, candidateSan.value.end) === previous.der.slice(previousSan.value.offset, previousSan.value.end))) {
+        return [j, i];
+      }
     }
   }
   return null;

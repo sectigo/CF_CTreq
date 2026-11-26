@@ -4,7 +4,7 @@
 //	id <TAB> model <TAB> add-chain verdict <TAB> add-pre-chain verdict
 //
 // where a verdict is "accept" or "reject". The models apply each origin's real JSON
-// and X.509 parsers, and its checks of the chain's names and precertificate status,
+// and X.509 parsers, and its checks of the chain's names, repetitions and precertificate status,
 // but don't verify signatures or apply a log's acceptance policy, as the snippet
 // doesn't either, and they reject a body larger than the origin's default limit. A
 // model's "accept" therefore means that the origin would accept the request if its
@@ -14,7 +14,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto"
 	stdx509 "crypto/x509"
+	"crypto/x509/pkix"
 	stdasn1 "encoding/asn1"
 	"encoding/json"
 	"flag"
@@ -31,6 +33,45 @@ import (
 )
 
 var poison = stdasn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 3}
+var subjectAltName = stdasn1.ObjectIdentifier{2, 5, 29, 17}
+
+// TesseraCT's lax509 compares the parsed key and the SAN extension as well as the
+// subject, including its early return when only one certificate has a SAN.
+func tesseractRepeated(certs []*stdx509.Certificate) bool {
+	type pubKeyEqual interface{ Equal(crypto.PublicKey) bool }
+	san := func(cert *stdx509.Certificate) *pkix.Extension {
+		for i := range cert.Extensions {
+			if cert.Extensions[i].Id.Equal(subjectAltName) {
+				return &cert.Extensions[i]
+			}
+		}
+		return nil
+	}
+	for i := 1; i < len(certs); i++ {
+		candidate := certs[i]
+		key, ok := candidate.PublicKey.(pubKeyEqual)
+		if !ok {
+			continue
+		}
+		candidateSAN := san(candidate)
+		for _, cert := range certs[:i] {
+			if !bytes.Equal(candidate.RawSubject, cert.RawSubject) || !key.Equal(cert.PublicKey) {
+				continue
+			}
+			previousSAN := san(cert)
+			if candidateSAN == nil && previousSAN == nil {
+				return true
+			}
+			if candidateSAN == nil || previousSAN == nil {
+				break
+			}
+			if bytes.Equal(candidateSAN.Value, previousSAN.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // All three origins decode the body with Go's encoding/json into this, and reject an
 // empty chain.
@@ -53,6 +94,9 @@ func tesseract(chain [][]byte, preChain bool) bool {
 		if !bytes.Equal(certs[i].RawIssuer, certs[i+1].RawSubject) {
 			return false
 		}
+	}
+	if tesseractRepeated(certs) {
+		return false
 	}
 	isPrecert := false
 	for _, e := range certs[0].Extensions {
@@ -89,6 +133,13 @@ func ctgo(chain [][]byte, preChain, sunlight bool) bool {
 	for i := 0; i+1 < len(certs); i++ {
 		if !bytes.Equal(certs[i].RawIssuer, certs[i+1].RawSubject) {
 			return false
+		}
+	}
+	for i := 1; i < len(certs); i++ {
+		for _, cert := range certs[:i] {
+			if cert.Equal(certs[i]) {
+				return false
+			}
 		}
 	}
 	isPrecert, err := ctfe.IsPrecertificate(certs[0])
