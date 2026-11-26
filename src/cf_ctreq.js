@@ -130,6 +130,8 @@ const CONFIG = {
 // How each origin differs, as far as it affects which requests it rejects:
 // - x509: its X.509 parser, either Go's crypto/x509 ("go") or
 //   certificate-transparency-go's x509 ("ctgo");
+// - pathIdentity: how its path builder detects repetition: "certificate" for the whole
+//   DER certificate, or "subject-key-san" for the subject, public key and SAN;
 // - allowsOptions: it answers CORS preflight (OPTIONS) requests itself;
 // - rejectsPrecertSigningCerts: it doesn't support Precertificate Signing Certificates;
 // - requiresRsaOrEcdsa: it rejects a chain with a certificate whose public key or signature
@@ -138,10 +140,15 @@ const CONFIG = {
 // - maxBodyBytes: its (default) maximum request body size: fixed in Sunlight, and set
 //   by --max_cert_chain_bytes in TesseraCT and --max_cert_chain_size in Trillian.
 const ORIGINS = {
-  sunlight: { x509: "ctgo", allowsOptions: true, rejectsPrecertSigningCerts: true, requiresRsaOrEcdsa: true, allowsAnyOrigin: true, maxBodyBytes: 128 * 1024 },
-  tesseract: { x509: "go", allowsOptions: false, rejectsPrecertSigningCerts: false, requiresRsaOrEcdsa: false, allowsAnyOrigin: false, maxBodyBytes: 512 * 1024 },
-  trillian: { x509: "ctgo", allowsOptions: false, rejectsPrecertSigningCerts: false, requiresRsaOrEcdsa: false, allowsAnyOrigin: false, maxBodyBytes: 512000 },
+  sunlight: { x509: "ctgo", pathIdentity: "certificate", allowsOptions: true, rejectsPrecertSigningCerts: true, requiresRsaOrEcdsa: true, allowsAnyOrigin: true, maxBodyBytes: 128 * 1024 },
+  tesseract: { x509: "go", pathIdentity: "subject-key-san", allowsOptions: false, rejectsPrecertSigningCerts: false, requiresRsaOrEcdsa: false, allowsAnyOrigin: false, maxBodyBytes: 512 * 1024 },
+  trillian: { x509: "ctgo", pathIdentity: "certificate", allowsOptions: false, rejectsPrecertSigningCerts: false, requiresRsaOrEcdsa: false, allowsAnyOrigin: false, maxBodyBytes: 512000 },
 };
+for (const [name, origin] of Object.entries(ORIGINS)) {
+  if (origin.pathIdentity !== "certificate" && origin.pathIdentity !== "subject-key-san") {
+    throw new Error(`ORIGINS.${name}.pathIdentity must be "certificate" or "subject-key-san"`);
+  }
+}
 // The origins that must all reject a request for it to be rejected, for each
 // environment.
 const ENVIRONMENTS = {
@@ -491,7 +498,7 @@ function certExtensions(cert, list, origin) {
       return null;
     }
     seen?.add(id);
-    if (id === OID_CT_POISON || id === OID_EXT_KEY_USAGE || (origin.x509 === "go" && id === OID_SUBJECT_ALT_NAME)) {
+    if (id === OID_CT_POISON || id === OID_EXT_KEY_USAGE || id === OID_SUBJECT_ALT_NAME) {
       extensions.push({ oid: id, critical, value });
     }
   }
@@ -709,7 +716,7 @@ function chainRejection(origin, certs, isPreChainAPI) {
 function repeatedCertificate(origin, certs) {
   for (let i = 1; i < certs.length; i++) {
     const candidate = certs[i];
-    if (origin.x509 === "ctgo") {
+    if (origin.pathIdentity === "certificate") {
       const previous = certs.findIndex((cert, j) => j < i && cert.der === candidate.der);
       if (previous >= 0) {
         return [previous, i];

@@ -1097,6 +1097,36 @@ describe("Accepted roots", () => {
 });
 
 describe("Origin environments and rejection responses", () => {
+  test("path identity is selected independently of the parser, including shared parsed chains", async () => {
+    const policy = (source, origin, value) => {
+      const field = new RegExp(`(${origin}: \\{ x509: "[^"]+", pathIdentity: )"[^"]+"`);
+      assert.match(source, field);
+      return source.replace(field, `$1${JSON.stringify(value)}`);
+    };
+    const load = (source, environment) => loadSource(source.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`));
+    const san = (name) => ext([0x55, 0x1d, 0x11], false, seq(tlv(0x82, Buffer.from(name))));
+    const withSan = b64(makeCA([san("one.example")]));
+    const issuer = (name) => b64(makeCert({ subject: Buffer.from("Test CA"), issuer: "Root", extensions: [san(name)] }));
+    const same = { chain: [CERT, withSan, issuer("one.example")] };
+    const different = { chain: [CERT, withSan, issuer("two.example")] };
+    const submit = async (s, body) => outcome(await s.fetch(post("/ct/v1/add-chain", body)));
+
+    const trillianIdentity = policy(SOURCE, "trillian", "subject-key-san");
+    const trillian = await load(trillianIdentity, "trillian");
+    assert.equal(await submit(trillian, same), "chain-repeated");
+    assert.equal(await submit(trillian, different), "forwarded");
+    assert.equal(await submit(await load(trillianIdentity, "common"), same), "forwarded");
+    const both = policy(trillianIdentity, "sunlight", "subject-key-san");
+    const common = await load(both, "common");
+    assert.equal(await submit(common, same), "chain-repeated");
+    assert.equal(await submit(common, different), "forwarded");
+
+    const certificateIdentity = await load(policy(SOURCE, "tesseract", "certificate"), "tesseract");
+    assert.equal(await submit(certificateIdentity, same), "forwarded");
+    assert.equal(await submit(certificateIdentity, { chain: [CERT, ISSUER, ISSUER] }), "chain-repeated");
+    await assert.rejects(load(policy(SOURCE, "sunlight", "unknown"), "sunlight"), /ORIGINS\.sunlight\.pathIdentity must be "certificate" or "subject-key-san"/);
+  });
+
   test("environments differ only as documented", async () => {
     const snippets = Object.fromEntries(await Promise.all(["tesseract", "sunlight", "trillian", "common"].map(async (e) => [e, await loadSnippet(e)])));
     const outcomes = async (makeRequest) =>

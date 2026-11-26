@@ -166,7 +166,7 @@ A `chain` of more than 10 entries (`CONFIG.maxChainLength`) is forwarded to the 
 
 #### chain-repeated
 
-`400 Bad Request` if a path containing all the submitted certificates in order would repeat a path identity that the origin's path builder will not follow. Sunlight and Trillian reject a repeated DER certificate. TesseraCT also detects distinct certificates with the same subject, public key and subject alternative name (SAN), including when both have no SAN. The snippet compares their DER-encoded subject and SubjectPublicKeyInfo and the encoded SAN extension value; it leaves other encodings of the same key to the origin.
+`400 Bad Request` if a path containing all the submitted certificates in order would repeat a path identity that the origin's path builder will not follow. The origin's `pathIdentity` profile selects this check independently of its X.509 parser. Sunlight and Trillian reject a repeated DER certificate. TesseraCT also detects distinct certificates with the same subject, public key and subject alternative name (SAN), including when both have no SAN. The snippet compares their DER-encoded subject and SubjectPublicKeyInfo and the encoded SAN extension value; it leaves other encodings of the same key to the origin.
 
 TesseraCT's path builder stops comparing earlier certificates if it finds one with the same subject and key but with a SAN present on only one of them. The snippet conservatively leaves the chain to the origin if an earlier certificate with the same subject could cause that, even if its key's encoding differs. As with other checks, `common` rejects only if every origin would reject. Chains longer than `CONFIG.maxChainLength` are forwarded unchecked.
 
