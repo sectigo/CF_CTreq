@@ -3,8 +3,8 @@
 // and empty OIDs, poison and critical flag variants, Precertificate Signing
 // Certificates, malformed and misplaced extensions, mismatched signature algorithms,
 // Ed25519, RSA and padded key and signature algorithm OIDs, matching and mismatching
-// names, bit flips), wrapped in JSON with chain key, escape, whitespace and BOM
-// variants, and base64 variants.
+// names, repeated certificates and SANs, bit flips), wrapped in JSON with chain key,
+// escape, whitespace and BOM variants, and base64 variants.
 import { tlv, seq, ctOid, OID_EKU, ext, makeCert as makeAnyCert, b64, ED25519, ED25519_KEY, ID_EC_PUBLIC_KEY, P256_KEY, p256Key } from "../der.mjs";
 
 // Certificates have a valid P-256 key unless the options give another.
@@ -93,6 +93,17 @@ export function generate({ seed = 1, count = 5000 } = {}) {
     const issuer = b64(makeCert({ subject: Buffer.from("Test CA"), version: pick([[2], [2], null]), extensions: Array.from({ length: 1 + rnd(2) }, eku) }));
     return rnd(3) ? [precert, issuer] : [precert, issuer, ISSUER];
   };
+  const repeatedChain = () => {
+    const leaf = b64(makeCert({ subject: Buffer.from("Leaf") }));
+    const ca = (issuer, san) => b64(makeCert({
+      subject: Buffer.from("Test CA"), issuer,
+      ...(san && { extensions: [ext([0x55, 0x1d, 0x11], false, seq(tlv(0x82, Buffer.from(san))))] }),
+    }));
+    const a = ca("Test CA");
+    const b = ca("Root CA");
+    const withSan = ca("Test CA", "one.example");
+    return pick([[leaf, a, a], [leaf, a, b], [leaf, withSan, a, b], [leaf, withSan, a, a, b], [leaf, withSan, ca("Root CA", "two.example")]]);
+  };
   // A chain with no deliberate defects (other than possibly a padded poison OID, which
   // only Go's crypto/x509 rejects), so that most origins would accept it.
   const validChain = () => {
@@ -134,7 +145,7 @@ export function generate({ seed = 1, count = 5000 } = {}) {
   const items = [];
   for (let id = 0; id < count; id++) {
     const r = rnd(10);
-    const certs = r === 0 ? preIssuerChain() : r < 4 ? validChain() : chain();
+    const certs = r === 0 ? preIssuerChain() : r < 4 ? validChain() : r === 9 && rnd(2) ? repeatedChain() : chain();
     let text = r === 1 ? JSON.stringify({ chain: certs.map(base64Variant) }) : body(certs);
     // Occasionally pad with whitespace to just within or just over an origin's body size limit.
     if (rnd(100) === 0) text += " ".repeat(Math.max(0, pick([128 * 1024, 512000, 512 * 1024]) + rnd(2) - Buffer.byteLength(text)));

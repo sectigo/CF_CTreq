@@ -469,7 +469,8 @@ describe("JSON and chain entries", () => {
 
   test("chains of more than 10 entries are forwarded without being checked", async () => {
     // Rejected with 10 entries, for an entry that isn't base64 and for not leading to a root.
-    for (const [chain, reason] of [[[...Array(9).fill(CERT), "!!!"], "entry-not-base64"], [Array(10).fill(b64(makeCert({ issuer: "Unknown CA", subject: Buffer.from("Unknown CA") }))), "root-not-accepted"]]) {
+    const unknownChain = [b64(makeCert({ issuer: "Unknown CA 0" })), ...Array.from({ length: 9 }, (_, i) => ca(`Unknown CA ${i}`, `Unknown CA ${i + 1}`))];
+    for (const [chain, reason] of [[[...Array(9).fill(CERT), "!!!"], "entry-not-base64"], [unknownChain, "root-not-accepted"]]) {
       const s = reason === "root-not-accepted" ? await rootsSnippet() : snippet;
       let res = await s.fetch(post("/ct/v1/add-chain", { chain }));
       assert.equal(outcome(res), reason);
@@ -485,7 +486,8 @@ describe("JSON and chain entries", () => {
   });
 
   test("maximum chain length and extra top-level fields are accepted", async () => {
-    const body = JSON.stringify({ chain: [CERT, ...Array(9).fill(ISSUER)], extra: true });
+    const chain = [CERT, ...Array.from({ length: 9 }, (_, i) => ca(i ? `CA ${i}` : "Test CA", `CA ${i + 1}`))];
+    const body = JSON.stringify({ chain, extra: true });
     const res = await snippet.fetch(post("/ct/v1/add-chain", body));
     assert.equal(res.status, 200);
     assert.equal(forwarded.body, body);
@@ -827,7 +829,7 @@ describe("Certificate and chain validation", () => {
     const serverAuth = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
     const psc = b64(makeCA([eku(serverAuth, ctOid(4))]));
     assert.equal(outcome(await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, psc] }))), "forwarded");
-    const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }));
+    const res = await snippet.fetch(post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc] }));
     assert.equal(outcome(res), expected({ tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }));
     // Only an extended key usage extension that Sunlight can parse counts.
     const unparseableEku = b64(makeCA([ext(OID_EKU, false, seq(tlv(0x06, ctOid(4)), Buffer.from([0x05, 0x00])))]));
@@ -850,6 +852,41 @@ describe("Certificate and chain validation", () => {
     assert.equal(res.status, 400);
     assert.equal(res.headers.get("X-CTreq-Reject"), "issuer-mismatch");
     assert.equal(forwarded, null);
+  });
+
+  test("path repetition follows each origin, including TesseraCT's SAN-presence edge case", async () => {
+    const san = (name) => ext([0x55, 0x1d, 0x11], false, seq(tlv(0x82, Buffer.from(name))));
+    const withSan = b64(makeCA([san("one.example")]));
+    const withSanOtherKey = b64(makeCert({ subject: Buffer.from("Test CA"), publicKey: p256Key(), extensions: [san("one.example")] }));
+    const withSameSan = b64(makeCert({ subject: Buffer.from("Test CA"), issuer: "Root", extensions: [san("one.example")] }));
+    const withOtherSan = b64(makeCert({ subject: Buffer.from("Test CA"), issuer: "Root", extensions: [san("two.example")] }));
+    const crossSigned = b64(makeCert({ subject: Buffer.from("Test CA"), issuer: "Root" }));
+    const otherKey = b64(makeCert({ subject: Buffer.from("Test CA"), issuer: "Root", publicKey: ED25519_KEY }));
+    const tesseractOnly = { tesseract: "chain-repeated", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" };
+    const all = { tesseract: "chain-repeated", sunlight: "chain-repeated", trillian: "chain-repeated", common: "chain-repeated" };
+    const forwardedEverywhere = { tesseract: "forwarded", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" };
+    const cases = [
+      [[CERT, ISSUER, ISSUER], all],
+      [[CERT, ISSUER, withSan, ISSUER], all],
+      [[CERT, ISSUER, crossSigned], tesseractOnly],
+      [[CERT, withSan, withSameSan], tesseractOnly],
+      [[CERT, withSan, withOtherSan], forwardedEverywhere],
+      [[CERT, withSan, ISSUER, crossSigned], forwardedEverywhere],
+      [[CERT, withSanOtherKey, ISSUER, crossSigned], forwardedEverywhere],
+      [[CERT, ISSUER, withSan, withSameSan], forwardedEverywhere],
+      [[CERT, withSan, ISSUER, ISSUER, crossSigned], { tesseract: "forwarded", sunlight: "chain-repeated", trillian: "chain-repeated", common: "forwarded" }],
+      [[CERT, ISSUER, otherKey], { ...forwardedEverywhere, sunlight: "algorithm-unsupported" }],
+    ];
+    for (const [chain, want] of cases) {
+      assert.equal(outcome(await snippet.fetch(post("/ct/v1/add-chain", { chain }))), expected(want));
+    }
+    const res = await snippet.fetch(post("/ct/v1/add-chain", { chain: [CERT, ISSUER, ISSUER] }));
+    assert.deepEqual(await res.json(), {
+      type: "https://github.com/sectigo/CF_CTreq#chain-repeated",
+      title: "chain contains a repeated path identity",
+      status: 400,
+      detail: "chain[2] has the same path identity as chain[1]",
+    });
   });
 });
 
@@ -950,7 +987,8 @@ describe("Accepted roots", () => {
     // Not if the chain reaches the root first, so that the rest of it isn't needed.
     assert.deepEqual(await submit([issuedBy("I"), ca("I", "R"), ca("R", "B")]), ["forwarded", undefined]);
     // Nor if another certificate in the chain might lead to the root instead.
-    assert.deepEqual(await submit([issuedBy("I"), ca("I", "B"), ca("B", "I"), ca("I", "R")]), ["forwarded", undefined]);
+    const alternateI = b64(makeCert({ subject: Buffer.from("I"), issuer: "R", publicKey: p256Key() }));
+    assert.deepEqual(await submit([issuedBy("I"), ca("I", "B"), ca("B", "I"), alternateI]), ["forwarded", undefined]);
     // Nor if the blocked key's name is also an accepted root's.
     const rootToo = await rootsSnippet(undefined, { roots: [ca("B")], blocked: [ca("B")] });
     assert.equal(outcome(await rootToo.fetch(post("/ct/v1/add-chain", { chain: [issuedBy("B")] }))), "forwarded");
@@ -1059,6 +1097,36 @@ describe("Accepted roots", () => {
 });
 
 describe("Origin environments and rejection responses", () => {
+  test("path identity is selected independently of the parser, including shared parsed chains", async () => {
+    const policy = (source, origin, value) => {
+      const field = new RegExp(`(${origin}: \\{ x509: "[^"]+", pathIdentity: )"[^"]+"`);
+      assert.match(source, field);
+      return source.replace(field, `$1${JSON.stringify(value)}`);
+    };
+    const load = (source, environment) => loadSource(source.replace(CONFIG_ENVIRONMENT, `$1${JSON.stringify(environment)}`));
+    const san = (name) => ext([0x55, 0x1d, 0x11], false, seq(tlv(0x82, Buffer.from(name))));
+    const withSan = b64(makeCA([san("one.example")]));
+    const issuer = (name) => b64(makeCert({ subject: Buffer.from("Test CA"), issuer: "Root", extensions: [san(name)] }));
+    const same = { chain: [CERT, withSan, issuer("one.example")] };
+    const different = { chain: [CERT, withSan, issuer("two.example")] };
+    const submit = async (s, body) => outcome(await s.fetch(post("/ct/v1/add-chain", body)));
+
+    const trillianIdentity = policy(SOURCE, "trillian", "subject-key-san");
+    const trillian = await load(trillianIdentity, "trillian");
+    assert.equal(await submit(trillian, same), "chain-repeated");
+    assert.equal(await submit(trillian, different), "forwarded");
+    assert.equal(await submit(await load(trillianIdentity, "common"), same), "forwarded");
+    const both = policy(trillianIdentity, "sunlight", "subject-key-san");
+    const common = await load(both, "common");
+    assert.equal(await submit(common, same), "chain-repeated");
+    assert.equal(await submit(common, different), "forwarded");
+
+    const certificateIdentity = await load(policy(SOURCE, "tesseract", "certificate"), "tesseract");
+    assert.equal(await submit(certificateIdentity, same), "forwarded");
+    assert.equal(await submit(certificateIdentity, { chain: [CERT, ISSUER, ISSUER] }), "chain-repeated");
+    await assert.rejects(load(policy(SOURCE, "sunlight", "unknown"), "sunlight"), /ORIGINS\.sunlight\.pathIdentity must be "certificate" or "subject-key-san"/);
+  });
+
   test("environments differ only as documented", async () => {
     const snippets = Object.fromEntries(await Promise.all(["tesseract", "sunlight", "trillian", "common"].map(async (e) => [e, await loadSnippet(e)])));
     const outcomes = async (makeRequest) =>
@@ -1071,7 +1139,7 @@ describe("Origin environments and rejection responses", () => {
       [() => post("/ct/v1/add-pre-chain", { chain: [b64(makeCert({ extensions: [POISON_EXT, POISON_EXT] }))] }), { tesseract: "cert-unparseable", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }],
       [() => post("/ct/v1/add-chain", { chain: [v1Poisoned] }), { tesseract: "forwarded", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "forwarded" }],
       [() => post("/ct/v1/add-pre-chain", { chain: [v1Poisoned] }), { tesseract: "cert-on-add-pre-chain", sunlight: "forwarded", trillian: "forwarded", common: "forwarded" }],
-      [() => post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc, ISSUER] }), { tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }],
+      [() => post("/ct/v1/add-pre-chain", { chain: [PRECERT, psc] }), { tesseract: "forwarded", sunlight: "psc-not-supported", trillian: "forwarded", common: "forwarded" }],
       [() => post("/ct/v1/add-chain", { chain: [CERT, b64(makeCert({ subject: Buffer.from("Test CA"), publicKey: ED25519_KEY }))] }), { tesseract: "forwarded", sunlight: "algorithm-unsupported", trillian: "forwarded", common: "forwarded" }],
       // Rejected the same way by all the origins.
       [() => post("/ct/v1/add-chain", { chain: [PRECERT] }), { tesseract: "precert-on-add-chain", sunlight: "precert-on-add-chain", trillian: "precert-on-add-chain", common: "precert-on-add-chain" }],
@@ -1154,6 +1222,7 @@ describe("Origin environments and rejection responses", () => {
       "precert-on-add-chain": post(ADD, { chain: [PRECERT] }),
       "cert-on-add-pre-chain": post(PRE, { chain: [CERT] }),
       "issuer-mismatch": post(ADD, { chain: [CERT, otherCA] }),
+      "chain-repeated": post(ADD, { chain: [CERT, ISSUER, ISSUER] }),
       "root-not-accepted": post(ADD, { chain: [b64(makeCert({ issuer: "Unknown CA" }))] }),
       "key-blocked": post(ADD, { chain: [b64(makeCert({ issuer: "Blocked CA" })), ca("Blocked CA", "Test CA")] }),
     };
